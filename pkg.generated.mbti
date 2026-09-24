@@ -6,19 +6,57 @@ import {
 }
 
 // Values
+pub fn crc32(Bytes) -> Int64
+
+pub fn decode_any(Bytes) -> (Kind, TiffBlock?) raise MetaError
+
 pub fn decode_tiff(Bytes) -> TiffBlock raise MetaError
+
+pub fn describe_container(Bytes) -> String raise MetaError
 
 pub fn empty_policy() -> Policy
 
 pub fn encode_tiff(TiffBlock) -> Bytes raise MetaError
 
+pub fn jpeg_decode(Bytes) -> TiffBlock? raise MetaError
+
+pub fn jpeg_exif(Bytes) -> Bytes? raise MetaError
+
+pub fn jpeg_inspect(Bytes) -> JpegMap raise MetaError
+
+pub fn jpeg_redact(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
+
+pub fn jpeg_remove_exif(Bytes) -> (Bytes, Bool) raise MetaError
+
+pub fn jpeg_replace_exif(Bytes, Bytes) -> Bytes raise MetaError
+
+pub fn marker_name(Int) -> String
+
+pub fn png_decode(Bytes) -> TiffBlock? raise MetaError
+
+pub fn png_exif(Bytes) -> Bytes? raise MetaError
+
+pub fn png_inspect(Bytes) -> PngMap raise MetaError
+
+pub fn png_redact(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
+
+pub fn png_remove_exif(Bytes) -> (Bytes, Bool) raise MetaError
+
+pub fn png_replace_exif(Bytes, Bytes) -> Bytes raise MetaError
+
 pub fn privacy_policy() -> Policy
+
+pub fn redact_any(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
 
 pub fn redact_tiff(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
 
 pub fn sensitive_category(Dir, Int) -> Sensitive?
 
+pub fn sniff(Bytes) -> Kind?
+
 pub fn strict_policy() -> Policy
+
+pub fn strip_any(Bytes) -> (Bytes, Bool) raise MetaError
 
 pub let tag_exif_ifd : Int
 
@@ -49,6 +87,14 @@ pub suberror MetaError {
   UnencodableText(Int, Int)
   TypeMismatch(Int, Int)
   ValueOutOfRange(Int, Int64)
+  NotJpeg(Int)
+  SegmentTooLarge(Int, Int, Int)
+  TruncatedAt(Int)
+  SegmentOverflow(Int, Int, Int)
+  ExtraMetadata(Int)
+  NotPng(Int)
+  BadChecksum(Int, Int64, Int64)
+  UnknownFormat(Int)
 } derive(@debug.Debug)
 pub fn MetaError::output(Self, &Logger) -> Unit
 pub fn MetaError::to_repr(Self) -> @debug.Repr
@@ -77,6 +123,57 @@ pub(all) struct IfdEntry {
 pub fn IfdEntry::equal(Self, Self) -> Bool
 pub fn IfdEntry::not_equal(Self, Self) -> Bool
 pub fn IfdEntry::to_repr(Self) -> @debug.Repr
+
+pub(all) struct JpegMap {
+  segments : Array[JpegSegment]
+  exif : (Int, Int)?
+  has_xmp : Bool
+} derive(Eq, @debug.Debug)
+pub fn JpegMap::describe(Self) -> String
+pub fn JpegMap::equal(Self, Self) -> Bool
+pub fn JpegMap::not_equal(Self, Self) -> Bool
+pub fn JpegMap::to_repr(Self) -> @debug.Repr
+
+pub(all) struct JpegSegment {
+  marker : Int
+  offset : Int
+  length : Int
+} derive(Eq, @debug.Debug)
+pub fn JpegSegment::equal(Self, Self) -> Bool
+pub fn JpegSegment::name(Self) -> String
+pub fn JpegSegment::not_equal(Self, Self) -> Bool
+pub fn JpegSegment::to_repr(Self) -> @debug.Repr
+
+pub(all) enum Kind {
+  Jpeg
+  Png
+  Tiff
+} derive(Eq, @debug.Debug)
+pub fn Kind::equal(Self, Self) -> Bool
+pub fn Kind::not_equal(Self, Self) -> Bool
+pub fn Kind::output(Self, &Logger) -> Unit
+pub fn Kind::to_repr(Self) -> @debug.Repr
+pub fn Kind::to_string(Self) -> String
+pub impl Show for Kind
+
+pub(all) struct PngChunk {
+  kind : String
+  offset : Int
+  length : Int
+} derive(Eq, @debug.Debug)
+pub fn PngChunk::equal(Self, Self) -> Bool
+pub fn PngChunk::not_equal(Self, Self) -> Bool
+pub fn PngChunk::to_repr(Self) -> @debug.Repr
+
+pub(all) struct PngMap {
+  chunks : Array[PngChunk]
+  exif : (Int, Int)?
+  has_xmp : Bool
+} derive(Eq, @debug.Debug)
+pub fn PngMap::describe(Self) -> String
+pub fn PngMap::equal(Self, Self) -> Bool
+pub fn PngMap::not_equal(Self, Self) -> Bool
+pub fn PngMap::to_repr(Self) -> @debug.Repr
 
 pub(all) struct Policy {
   location : Bool

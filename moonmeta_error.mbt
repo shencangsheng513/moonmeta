@@ -26,6 +26,22 @@ pub suberror MetaError {
   TypeMismatch(Int, Int)
   /// 回写时数值超出该类型码的宽度：(tag, 值)
   ValueOutOfRange(Int, Int64)
+  /// 文件开头不是 JPEG 的 SOI：(偏移)
+  NotJpeg(Int)
+  /// 段声明的长度超出文件剩余：(段偏移, 声明, 可用)
+  SegmentTooLarge(Int, Int, Int)
+  /// 走到文件尾也没读到段码：(偏移)
+  TruncatedAt(Int)
+  /// 回写时段长字段放不下这份载荷：(段偏移, 上限, 需要)
+  SegmentOverflow(Int, Int, Int)
+  /// 还有第二份元数据是本版本够不着的（重复 APP1，或藏在压缩流之后）：(偏移)
+  ExtraMetadata(Int)
+  /// 文件开头不是 PNG 的 8 字节签名：(偏移)
+  NotPng(Int)
+  /// PNG 块的 CRC 与字节对不上：(块偏移, 声明, 实算)
+  BadChecksum(Int, Int64, Int64)
+  /// 开头既不是 JPEG 也不是 PNG 也不是 TIFF：(偏移)
+  UnknownFormat(Int)
 } derive(Debug)
 
 ///|
@@ -73,6 +89,38 @@ pub impl Show for MetaError with fn output(self : MetaError, logger) {
       logger.write_string(
         "tag \{tag_hex(tag)} holds \{v}, which does not fit its declared TIFF type",
       )
+    NotJpeg(off) =>
+      logger.write_string(
+        "no JPEG start-of-image marker (0xffd8) at offset \{off}",
+      )
+    SegmentTooLarge(off, declared, available) =>
+      logger.write_string(
+        "segment at offset \{off} declares \{declared} byte(s), only \{available} left in the file",
+      )
+    TruncatedAt(off) =>
+      logger.write_string(
+        "the file runs out at offset \{off}, in the middle of a segment table",
+      )
+    SegmentOverflow(off, limit, needed) =>
+      logger.write_string(
+        "the segment at offset \{off} can hold \{limit} byte(s); this payload needs \{needed}",
+      )
+    ExtraMetadata(off) =>
+      logger.write_string(
+        "a second metadata block sits at offset \{off}; removing only the first one would be a fake redaction",
+      )
+    NotPng(off) =>
+      logger.write_string(
+        "not a PNG: the 8-byte signature differs at offset \{off}",
+      )
+    BadChecksum(off, declared, computed) =>
+      logger.write_string(
+        "chunk at offset \{off} declares CRC \{hex32(declared)} but its bytes hash to \{hex32(computed)}",
+      )
+    UnknownFormat(off) =>
+      logger.write_string(
+        "none of the JPEG, PNG or TIFF magics is at offset \{off}; the container cannot be identified",
+      )
   }
 }
 
@@ -87,4 +135,14 @@ fn tag_hex(tag : Int) -> String {
   "0x" +
   ((tag >> 8) & 0xff).to_byte().to_hex() +
   (tag & 0xff).to_byte().to_hex()
+}
+
+///|
+/// 32 位无符号数写成 `0x........`。CRC 会超过 31 位，所以一路用 Int64。
+fn hex32(v : Int64) -> String {
+  let b0 = ((v >> 24) & 255L).to_byte().to_hex()
+  let b1 = ((v >> 16) & 255L).to_byte().to_hex()
+  let b2 = ((v >> 8) & 255L).to_byte().to_hex()
+  let b3 = (v & 255L).to_byte().to_hex()
+  "0x" + b0 + b1 + b2 + b3
 }
