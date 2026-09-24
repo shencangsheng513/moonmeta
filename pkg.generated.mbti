@@ -8,11 +8,25 @@ import {
 // Values
 pub fn decode_tiff(Bytes) -> TiffBlock raise MetaError
 
+pub fn empty_policy() -> Policy
+
 pub fn encode_tiff(TiffBlock) -> Bytes raise MetaError
+
+pub fn privacy_policy() -> Policy
+
+pub fn redact_tiff(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
+
+pub fn sensitive_category(Dir, Int) -> Sensitive?
+
+pub fn strict_policy() -> Policy
 
 pub let tag_exif_ifd : Int
 
 pub let tag_gps_ifd : Int
+
+pub let tag_interop_ifd : Int
+
+pub fn tag_name(Dir, Int) -> String
 
 pub let tag_thumb_length : Int
 
@@ -42,6 +56,19 @@ pub fn MetaError::to_string(Self) -> String
 pub impl Show for MetaError
 
 // Types and methods
+pub(all) enum Dir {
+  Ifd0
+  Exif
+  Gps
+} derive(Eq, @debug.Debug)
+pub fn Dir::equal(Self, Self) -> Bool
+pub fn Dir::label(Self) -> String
+pub fn Dir::not_equal(Self, Self) -> Bool
+pub fn Dir::output(Self, &Logger) -> Unit
+pub fn Dir::to_repr(Self) -> @debug.Repr
+pub fn Dir::to_string(Self) -> String
+pub impl Show for Dir
+
 pub(all) struct IfdEntry {
   tag : Int
   type_code : Int
@@ -50,6 +77,19 @@ pub(all) struct IfdEntry {
 pub fn IfdEntry::equal(Self, Self) -> Bool
 pub fn IfdEntry::not_equal(Self, Self) -> Bool
 pub fn IfdEntry::to_repr(Self) -> @debug.Repr
+
+pub(all) struct Policy {
+  location : Bool
+  identity : Bool
+  device_id : Bool
+  maker_note : Bool
+  comments : Bool
+  timestamps : Bool
+} derive(Eq, @debug.Debug)
+pub fn Policy::covers(Self, Sensitive) -> Bool
+pub fn Policy::equal(Self, Self) -> Bool
+pub fn Policy::not_equal(Self, Self) -> Bool
+pub fn Policy::to_repr(Self) -> @debug.Repr
 
 pub(all) struct Rational {
   num : Int64
@@ -62,6 +102,40 @@ pub fn Rational::to_double(Self) -> Double
 pub fn Rational::to_repr(Self) -> @debug.Repr
 pub fn Rational::to_string(Self) -> String
 pub impl Show for Rational
+
+pub(all) struct Redaction {
+  removed : Array[Removed]
+  dropped_thumbnail : Bool
+} derive(Eq, @debug.Debug)
+pub fn Redaction::equal(Self, Self) -> Bool
+pub fn Redaction::not_equal(Self, Self) -> Bool
+pub fn Redaction::to_repr(Self) -> @debug.Repr
+
+pub(all) struct Removed {
+  dir : Dir
+  tag : Int
+  name : String
+  category : Sensitive
+} derive(Eq, @debug.Debug)
+pub fn Removed::equal(Self, Self) -> Bool
+pub fn Removed::not_equal(Self, Self) -> Bool
+pub fn Removed::to_repr(Self) -> @debug.Repr
+
+pub(all) enum Sensitive {
+  Location
+  Identity
+  DeviceId
+  MakerNote
+  Comments
+  Timestamps
+} derive(Eq, @debug.Debug)
+pub fn Sensitive::equal(Self, Self) -> Bool
+pub fn Sensitive::label(Self) -> String
+pub fn Sensitive::not_equal(Self, Self) -> Bool
+pub fn Sensitive::output(Self, &Logger) -> Unit
+pub fn Sensitive::to_repr(Self) -> @debug.Repr
+pub fn Sensitive::to_string(Self) -> String
+pub impl Show for Sensitive
 
 pub(all) enum TagValue {
   Text(String)
@@ -93,6 +167,7 @@ pub fn TiffBlock::date_time(Self) -> String?
 pub fn TiffBlock::date_time_original(Self) -> String?
 pub fn TiffBlock::equal(Self, Self) -> Bool
 pub fn TiffBlock::exif_find(Self, Int) -> IfdEntry?
+pub fn TiffBlock::findings(Self, Policy) -> Array[Removed]
 pub fn TiffBlock::get(Self, Int) -> TagValue?
 pub fn TiffBlock::gps_find(Self, Int) -> IfdEntry?
 pub fn TiffBlock::gps_lat_lon(Self) -> (Double, Double)?
@@ -102,6 +177,7 @@ pub fn TiffBlock::make(Self) -> String?
 pub fn TiffBlock::model(Self) -> String?
 pub fn TiffBlock::not_equal(Self, Self) -> Bool
 pub fn TiffBlock::orientation(Self) -> Int?
+pub fn TiffBlock::redact(Self, Policy) -> (Self, Redaction)
 pub fn TiffBlock::software(Self) -> String?
 pub fn TiffBlock::to_repr(Self) -> @debug.Repr
 

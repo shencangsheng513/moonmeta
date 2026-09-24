@@ -65,6 +65,10 @@ pub let tag_thumb_offset : Int = 0x0201
 pub let tag_thumb_length : Int = 0x0202
 
 ///|
+/// Interop 子目录指针。本版本不建模 Interop IFD，解析时消费掉、回写时不再出现。
+pub let tag_interop_ifd : Int = 0xa005
+
+///|
 /// 从一个 TIFF 字节块解析。`data` 的第一字节必须是 `I`/`M`。
 pub fn decode_tiff(data : Bytes) -> TiffBlock raise MetaError {
   if data.length() < 8 {
@@ -100,7 +104,7 @@ pub fn decode_tiff(data : Bytes) -> TiffBlock raise MetaError {
   {
     little,
     ifd0: without(dir0.entries, [tag_exif_ifd, tag_gps_ifd]),
-    exif: without(exif_dir.entries, [tag_gps_ifd, tag_exif_ifd]),
+    exif: without(exif_dir.entries, [tag_gps_ifd, tag_exif_ifd, tag_interop_ifd]),
     gps: gps_dir.entries,
     has_ifd1: dir0.next > 0L || exif_dir.next > 0L || gps_dir.next > 0L,
   }
