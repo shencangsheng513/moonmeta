@@ -1,0 +1,10 @@
+import {
+  "moonbitlang/core/debug",
+}
+
+import {
+  "moonbitlang/core/quickcheck",
+  "moonbitlang/core/test",
+} for "test"
+
+warnings = "-core_package_not_imported-unused_package"

@@ -1,0 +1,5 @@
+// import {
+//   "shencangsheng513/moonmeta" @lib,
+// }
+
+pkgtype(kind: "executable")

@@ -1,0 +1,110 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "shencangsheng513/moonmeta"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn decode_tiff(Bytes) -> TiffBlock raise MetaError
+
+pub fn encode_tiff(TiffBlock) -> Bytes raise MetaError
+
+pub let tag_exif_ifd : Int
+
+pub let tag_gps_ifd : Int
+
+pub let tag_thumb_length : Int
+
+pub let tag_thumb_offset : Int
+
+pub fn type_decodable(Int) -> Bool
+
+pub fn type_size(Int) -> Int?
+
+// Errors
+pub suberror MetaError {
+  TooShort(Int, Int)
+  BadTiffHeader(Int)
+  BadByteOrder(Int)
+  IfdOffsetOutOfRange(Int64)
+  EntryTooLarge(Int, Int, Int)
+  ValueOffsetOutOfRange(Int, Int64)
+  UnsupportedType(Int, Int)
+  SubIfdOutOfRange(Int, Int64)
+  UnencodableText(Int, Int)
+  TypeMismatch(Int, Int)
+  ValueOutOfRange(Int, Int64)
+} derive(@debug.Debug)
+pub fn MetaError::output(Self, &Logger) -> Unit
+pub fn MetaError::to_repr(Self) -> @debug.Repr
+pub fn MetaError::to_string(Self) -> String
+pub impl Show for MetaError
+
+// Types and methods
+pub(all) struct IfdEntry {
+  tag : Int
+  type_code : Int
+  value : TagValue
+} derive(Eq, @debug.Debug)
+pub fn IfdEntry::equal(Self, Self) -> Bool
+pub fn IfdEntry::not_equal(Self, Self) -> Bool
+pub fn IfdEntry::to_repr(Self) -> @debug.Repr
+
+pub(all) struct Rational {
+  num : Int64
+  den : Int64
+} derive(Eq, @debug.Debug)
+pub fn Rational::equal(Self, Self) -> Bool
+pub fn Rational::not_equal(Self, Self) -> Bool
+pub fn Rational::output(Self, &Logger) -> Unit
+pub fn Rational::to_double(Self) -> Double
+pub fn Rational::to_repr(Self) -> @debug.Repr
+pub fn Rational::to_string(Self) -> String
+pub impl Show for Rational
+
+pub(all) enum TagValue {
+  Text(String)
+  Shorts(Array[Int])
+  Longs(Array[Int64])
+  Rationals(Array[Rational])
+  Raw(Array[Byte])
+} derive(Eq, @debug.Debug)
+pub fn TagValue::equal(Self, Self) -> Bool
+pub fn TagValue::not_equal(Self, Self) -> Bool
+pub fn TagValue::output(Self, &Logger) -> Unit
+pub fn TagValue::rationals(Self) -> Array[Rational]?
+pub fn TagValue::shorts(Self) -> Array[Int]?
+pub fn TagValue::text(Self) -> String?
+pub fn TagValue::to_repr(Self) -> @debug.Repr
+pub fn TagValue::to_string(Self) -> String
+pub impl Show for TagValue
+
+pub(all) struct TiffBlock {
+  little : Bool
+  ifd0 : Array[IfdEntry]
+  exif : Array[IfdEntry]
+  gps : Array[IfdEntry]
+  has_ifd1 : Bool
+} derive(Eq, @debug.Debug)
+pub fn TiffBlock::artist(Self) -> String?
+pub fn TiffBlock::copyright(Self) -> String?
+pub fn TiffBlock::date_time(Self) -> String?
+pub fn TiffBlock::date_time_original(Self) -> String?
+pub fn TiffBlock::equal(Self, Self) -> Bool
+pub fn TiffBlock::exif_find(Self, Int) -> IfdEntry?
+pub fn TiffBlock::get(Self, Int) -> TagValue?
+pub fn TiffBlock::gps_find(Self, Int) -> IfdEntry?
+pub fn TiffBlock::gps_lat_lon(Self) -> (Double, Double)?
+pub fn TiffBlock::has_gps(Self) -> Bool
+pub fn TiffBlock::ifd0_find(Self, Int) -> IfdEntry?
+pub fn TiffBlock::make(Self) -> String?
+pub fn TiffBlock::model(Self) -> String?
+pub fn TiffBlock::not_equal(Self, Self) -> Bool
+pub fn TiffBlock::orientation(Self) -> Int?
+pub fn TiffBlock::software(Self) -> String?
+pub fn TiffBlock::to_repr(Self) -> @debug.Repr
+
+// Type aliases
+
+// Traits
