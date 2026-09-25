@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.backend }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 三个后端都要绿：这个库不该有任何平台相关的东西。一个后端过、
+        # 另一个后端不过，说明代码里混进了只在某个运行时装得起来的行为。
+        # native 不在这里：`x/fs` 带 C stub，编译它要有 C 编译器，
+        # 那条路径交给下面的命令行作业，它本来就要跑真文件。
+        include:
+          - backend: wasm
+            target: wasm
+          - backend: javascript
+            target: js
+          - backend: wasm-gc
+            target: wasm-gc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain version
+        run: moon version --all
+
+      - name: moon fmt 之后不该再有 diff
+        run: |
+          moon fmt
+          git diff --exit-code || { echo "请先运行 moon fmt"; exit 1; }
+
+      - name: moon info 之后不该再有 diff
+        run: |
+          moon info
+          git diff --exit-code || { echo "请提交 moon info 生成的 pkg.generated.mbti"; exit 1; }
+
+      - name: Test (${{ matrix.backend }})
+        run: moon test --target ${{ matrix.target }}
+
+  coverage:
+    name: 覆盖率
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Test with coverage
+        run: moon test --enable-coverage
+
+      - name: Summary
+        run: moon coverage analyze -- -f summary
+
+  cli:
+    name: 命令行端到端
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pillow
+        run: pip install --quiet pillow
+
+      # 造 fixture、读回、比对，全部走仓库里的脚本：
+      # CI 里写内联 python 的话，本地就没法同一条命令复现同一次失败。
+      - name: 用 Pillow 造一份带 EXIF 的真实 JPEG/PNG
+        run: python ci/make_fixture.py /tmp/fix
+
+      - name: 独立第二意见：Pillow 必须读到我们写进去的东西
+        run: python ci/assert_pillow_reads.py /tmp/fix
+
+      - name: read / audit / redact / strip
+        run: |
+          moon run cmd/main -- read /tmp/fix/cross.jpg
+          moon run cmd/main -- audit /tmp/fix/cross.jpg --policy strict
+          moon run cmd/main -- redact /tmp/fix/cross.jpg --policy strict
+          moon run cmd/main -- redact /tmp/fix/cross.png --policy strict
+          moon run cmd/main -- strip /tmp/fix/cross.jpg
+          moon run cmd/main -- strip /tmp/fix/cross.png
+
+      - name: 用 Pillow 验收脱敏结果
+        run: python ci/assert_redacted.py /tmp/fix

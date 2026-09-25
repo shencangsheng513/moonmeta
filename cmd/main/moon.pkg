@@ -1,5 +1,16 @@
-// import {
-//   "shencangsheng513/moonmeta" @lib,
-// }
+import {
+  "shencangsheng513/moonmeta" @lib,
+  "moonbitlang/core/argparse",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/env",
+  "moonbitlang/x/fs",
+  "moonbitlang/x/sys",
+}
+
+import {
+  "moonbitlang/core/test",
+} for "test"
 
 pkgtype(kind: "executable")
+
+warnings = "-core_package_not_imported-unused_package"

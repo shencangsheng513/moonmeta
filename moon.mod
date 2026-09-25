@@ -1,13 +1,5 @@
-// Learn more about moon.mod configuration:
+// moon.mod 的各项含义：
 // https://docs.moonbitlang.com/en/latest/toolchain/moon/module.html
-//
-// To add a dependency, run this command in your terminal:
-//   moon add moonbitlang/x
-//
-// Or manually declare it in `import`, for example:
-// import {
-//   "moonbitlang/x@0.4.6",
-// }
 
 name = "shencangsheng513/moonmeta"
 
@@ -19,8 +11,21 @@ repository = ""
 
 license = "Apache-2.0"
 
-keywords = [ ]
+keywords = [
+  "exif",
+  "metadata",
+  "jpeg",
+  "png",
+  "tiff",
+  "gps",
+  "privacy",
+  "redaction",
+]
 
 preferred_target = "wasm"
 
-description = ""
+description = "Read, write and redact EXIF metadata in JPEG, PNG and TIFF files, in pure MoonBit."
+
+import {
+  "moonbitlang/x@0.5.5",
+}

@@ -50,21 +50,17 @@ test "每条错误都报出自己的编号、偏移与数额" {
 ///|
 test "CRC 用十六进制报，而且补齐到 8 位" {
   @test.assert_eq(
-    (BadChecksum(33, 3421780262L, 16L)).to_string(),
+    BadChecksum(33, 3421780262L, 16L).to_string(),
     "chunk at offset 33 declares CRC 0xcbf43926 but its bytes hash to 0x00000010",
   )
 }
 
 ///|
 test "拒绝写入的错误明说了为什么不能只删一半" {
-  cites(
-    (ExtraMetadata(260)).to_string(),
-    ["fake redaction"],
-  )
-  cites(
-    (SegmentOverflow(20, 65535, 90008)).to_string(),
-    ["can hold 65535", "needs 90008"],
-  )
+  cites(ExtraMetadata(260).to_string(), ["fake redaction"])
+  cites(SegmentOverflow(20, 65535, 90008).to_string(), [
+    "can hold 65535", "needs 90008",
+  ])
 }
 
 ///|

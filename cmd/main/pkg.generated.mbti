@@ -6,6 +6,9 @@ package "shencangsheng513/moonmeta/cmd/main"
 // Errors
 
 // Types and methods
+type Action
+
+type Request
 
 // Type aliases
 
