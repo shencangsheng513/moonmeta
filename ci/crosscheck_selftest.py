@@ -1,9 +1,12 @@
 """归因判据自己的行为测试：解释器太宽容时，语料是查不出来的。
 
-对拍脚本里那三条判据（`xmp_injected` / `zero_length_entries` /
+对拍脚本里那三条归因判据（`xmp_injected` / `zero_length_entries` /
 `xmp_flag_problems`）都只在真实语料上各命中几次。把判据改宽成
 `return True`，这一轮跑批照样全绿——所以光靠语料不能证明它保守。这里用合成输入正面钉住它：
 每种"证据不齐"的情形都必须拒绝归因，让那格红回到 triage 里去。
+`gps_via_exif_pointer`（GPS 指针挂在 Exif 里）和 `privacy_expectations`
+（默认策略该删什么、该留什么）同理：后者一整批格子在语料上一次都不命中
+也仍然全绿，所以它的双向门槛只能在这里钉。
 
 跑法（不需要语料，也不需要 moon）：
 
@@ -20,6 +23,7 @@ from crosscheck_real import (  # noqa: E402
     XMP_MARKS,
     gps_via_exif_pointer,
     nested_gps_entries,
+    privacy_expectations,
     xmp_flag_problems,
     xmp_injected,
     zero_length_entries,
@@ -210,6 +214,88 @@ class GpsNested(unittest.TestCase):
 
     def test_Pillow没读到的那条仍要红(self):
         self.assertFalse(gps_via_exif_pointer({0, 1, 5}, {0, 1}))
+
+
+def finding(dir_name, tag, name, category):
+    return {"dir": dir_name, "tag": tag, "name": name, "category": category}
+
+
+ALL_DIRS = ("IFD0", "Exif", "GPS", "Interop")
+
+
+def dirs(**kw):
+    # 每次都给全新的 set：共享一个可变默认值，一个用例的改动会渗进下一个
+    return {name: set(kw.get(name, ())) for name in ALL_DIRS}
+
+
+class PrivacyExpectations(unittest.TestCase):
+    """默认策略（privacy）的双向期望：该删的删了没有、该留的还在不在。
+
+    这一批格子在真实语料上大多一次都不命中（比如"时间戳被误删"，正常情况下
+    永远为空），所以全绿不说明它在工作——门槛必须在合成输入上钉。
+    """
+
+    def test_非时间戳的还读得到就是残留(self):
+        f = [finding("IFD0", 271, "Make", "device_id")]
+        res, lost = privacy_expectations(
+            f, dirs(IFD0={271}), dirs(IFD0={271}), set()
+        )
+        self.assertEqual(res, [("IFD0", 271, "Make")])
+        self.assertEqual(lost, [])
+
+    def test_该删的删干净了两边都空(self):
+        f = [finding("IFD0", 271, "Make", "device_id")]
+        res, lost = privacy_expectations(f, dirs(IFD0={271}), dirs(), set())
+        self.assertEqual((res, lost), ([], []))
+
+    def test_时间戳在原图读得到又被删了就是误删(self):
+        f = [finding("Exif", 36867, "DateTimeOriginal", "timestamps")]
+        res, lost = privacy_expectations(
+            f, dirs(Exif={36867}), dirs(Exif=set()), set()
+        )
+        self.assertEqual(lost, [("Exif", 36867, "DateTimeOriginal")])
+        self.assertEqual(res, [])
+
+    def test_时间戳留着不误报(self):
+        f = [finding("Exif", 36867, "DateTimeOriginal", "timestamps")]
+        res, lost = privacy_expectations(
+            f, dirs(Exif={36867}), dirs(Exif={36867}), set()
+        )
+        self.assertEqual((res, lost), ([], []))
+
+    def test_量尺在原图上看不到的时间戳不许报误删(self):
+        # Pillow 读不到的条目，"产物里也没有"不构成证据：门槛得在原图那一侧。
+        f = [finding("Exif", 36867, "DateTimeOriginal", "timestamps")]
+        res, lost = privacy_expectations(f, dirs(), dirs(Exif=set()), set())
+        self.assertEqual((res, lost), ([], []))
+
+    def test_已归因的时间戳格子不算误删(self):
+        # 那个值住在 XMP 包里，摘完整包之后读不到它是预期（GPS 指针那格同理）
+        f = [finding("Exif", 36867, "DateTimeOriginal", "timestamps")]
+        res, lost = privacy_expectations(
+            f, dirs(Exif={36867}), dirs(Exif=set()), {("Exif", 36867)}
+        )
+        self.assertEqual((res, lost), ([], []))
+
+    def test_归因豁免不许渗到残留那一方向(self):
+        # 归因说的是"原图上量尺看漏了"，与"产物里还读得到"是两回事
+        f = [finding("IFD0", 271, "Make", "device_id")]
+        res, lost = privacy_expectations(
+            f, dirs(), dirs(IFD0={271}), {("IFD0", 271)}
+        )
+        self.assertEqual(res, [("IFD0", 271, "Make")])
+
+    def test_按目录比不许跨目录串台(self):
+        # 编号 1 在 GPS 里是纬度引用、在 Interop 里是 InteropIndex
+        f = [
+            finding("GPS", 1, "GPSLatitudeRef", "location"),
+            finding("Interop", 1, "InteropIndex", "identity"),
+        ]
+        res, lost = privacy_expectations(
+            f, dirs(GPS={1}, Interop={1}), dirs(Interop={1}), set()
+        )
+        self.assertEqual(res, [("Interop", 1, "InteropIndex")])
+        self.assertEqual(lost, [])
 
 
 if __name__ == "__main__":

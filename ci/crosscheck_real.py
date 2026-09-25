@@ -12,6 +12,11 @@
    包里的敏感键；摘除了就必须由 CLI 说出来。这一条是上一轮跑批抓出来的真漏
    （82 个产物里 13 个还带着完整的第二份元数据），所以它长在这里，
    不长在 .scratch 的一次性脚本里。
+4. **两档策略都跑**——写侧不只验 strict，也验 CLI 的缺省档 privacy：
+   用户不打 `--policy` 时拿到的就是它，而它先前一条真实语料证据都没有。
+   privacy 的期望不另抄一份敏感表，从同一个文件的 strict findings 按
+   category 推（两档只差 `timestamps`）；外加一条逐字节比对，
+   钉住"缺省产物 == 显式 --policy privacy 的产物"。
 
 "点名哪些条目"这件事刻意不在这个脚本里再抄一份策略：它取自 `audit --json`
 的输出。策略只有一个来源（库），这个脚本只负责"另一个人怎么看"。
@@ -160,23 +165,38 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def xmp_residue(dst, src_blob, red_out, stats):
-    """产物字节里的 XMP 残留，加上"摘了有没有说"。空列表 = 这一关过了。"""
-    stats["redacted"] = stats.get("redacted", 0) + 1
+def xmp_residue(
+    dst,
+    src_blob,
+    red_out,
+    stats,
+    policy="strict",
+    redacted_key="redacted",
+    dropped_key="xmp_dropped",
+):
+    """产物字节里的 XMP 残留，加上"摘了有没有说"。空列表 = 这一关过了。
+
+    计数器键按策略分开：`redacted` / `xmp_dropped` 记的是 strict 那一趟，
+    privacy 那一趟另用 `redacted_privacy` / `xmp_dropped_privacy`。
+    共用一个键会把"产物复查 N 个"的分母翻倍，那行数字就没有意义了。
+    """
+    stats[redacted_key] = stats.get(redacted_key, 0) + 1
     out = []
     blob = dst.read_bytes()
     marks = [m.decode() for m in XMP_MARKS if m in blob]
     keys = [k.decode() for k in XMP_SENSITIVE if k in blob]
     if marks:
-        out.append("strict 之后产物里还有 XMP 包: {}".format(marks))
+        out.append("{} 之后产物里还有 XMP 包: {}".format(policy, marks))
     if keys:
-        out.append("strict 之后产物字节里还搜得到 XMP 敏感键: {}".format(keys))
+        out.append(
+            "{} 之后产物字节里还搜得到 XMP 敏感键: {}".format(policy, keys)
+        )
     # 摘了却不说，和没摘一样危险：下一次有人会以为这个文件本来就干净。
     if any(m in src_blob for m in XMP_MARKS) and not marks:
         if "XMP" not in red_out:
-            out.append("整包 XMP 已被摘除，但 CLI 没有披露")
+            out.append("{}：整包 XMP 已被摘除，但 CLI 没有披露".format(policy))
         else:
-            stats["xmp_dropped"] = stats.get("xmp_dropped", 0) + 1
+            stats[dropped_key] = stats.get(dropped_key, 0) + 1
     return out
 
 
@@ -284,6 +304,44 @@ def xmp_injected(src_blob, dir_name, tags, doc):
 KNOWN_IFD0_NAMES = {0x0112: "Orientation"}
 
 
+def audit_findings(moon, repo, path, policy):
+    """跑一次 `audit --json`，只拿 findings 那一项。"""
+    code, out = run_moon(
+        moon, ["audit", str(path), "--policy", policy, "--json"], repo
+    )
+    assert code == 0, "audit 在 {} 上失败了: {}".format(path, out)
+    return json.loads(out.strip().splitlines()[-1])["findings"]
+
+
+def privacy_expectations(findings, their, after, explained):
+    """默认策略该删什么、该留什么——全部从这个文件的 strict findings 推。
+
+    `privacy` 与 `strict` 唯一的差别是 `timestamps` 那一格，所以这里不需要
+    第二份敏感表（抄一份，就会有一份过时不候的期望）。返回 (残留, 误删)：
+
+    - 残留：非时间戳的被点名条目，在 privacy 产物里 Pillow 还读得到。
+    - 误删：时间戳条目，Pillow 在**原图**里读得到、在产物里读不到了——
+      默认策略删时间戳，就是替用户把照片的拍摄时间弄没了。
+
+    `explained` 是上一段拿字节证据归因过的格子，只用在误删这一方向：
+    那种值住在 XMP 包里，两档策略都会连包一起摘，产物里读不到它是预期。
+    残留这一方向刻意不减 `explained`、也不加 `t in their` 门槛：
+    产物里读得到就是读得到（strict 那条 `still` 同理）。
+    """
+    residue = []
+    ts_lost = []
+    for f in findings:
+        d, t = f["dir"], f["tag"]
+        if f["category"] == "timestamps":
+            if (d, t) in explained:
+                continue
+            if t in their[d] and t not in after.get(d, set()):
+                ts_lost.append((d, t, f["name"]))
+        elif t in after.get(d, set()):
+            residue.append((d, t, f["name"]))
+    return residue, ts_lost
+
+
 def check_one(moon, repo, src, out_dir, stats):
     """一个文件的五条结论。返回 (状态桶, 需要分诊的说明列表)。"""
     notes = []
@@ -380,11 +438,7 @@ def check_one(moon, repo, src, out_dir, stats):
                 )
 
         # 3) 脱敏效果：点名清单来自 audit，观察来自 Pillow
-        audit_code, audit_out = run_moon(
-            moon, ["audit", str(src), "--policy", "strict", "--json"], repo
-        )
-        assert audit_code == 0, "audit 在能读的文件上失败了: " + audit_out
-        findings = json.loads(audit_out.strip().splitlines()[-1])["findings"]
+        findings = audit_findings(moon, repo, src, "strict")
         named = {(f["dir"], f["tag"]) for f in findings}
         # 按目录分桶比：0x0001 在 GPS 里是纬度引用，在 Interop 里是 InteropIndex。
         # 拿裸编号跨目录比，会把没点名的条目算成残留。
@@ -427,16 +481,7 @@ def check_one(moon, repo, src, out_dir, stats):
             bucket = "triage"
             notes.append("脱敏结果我们自己读不回来: " + (after_err or "")[:160])
         else:
-            residue = [
-                f
-                for f in json.loads(
-                    run_moon(
-                        moon,
-                        ["audit", str(dst), "--policy", "strict", "--json"],
-                        repo,
-                    )[1].strip().splitlines()[-1]
-                )["findings"]
-            ]
+            residue = audit_findings(moon, repo, dst, "strict")
             if residue:
                 bucket = "triage"
                 notes.append(
@@ -482,6 +527,93 @@ def check_one(moon, repo, src, out_dir, stats):
             except OSError as e:
                 notes.append("像素无法比对（脱敏结果解不开）: {}".format(e))
                 bucket = "triage"
+
+        # 5) 默认策略那一档。上面四步全跑在 strict 上，而用户不打 `--policy`
+        #    时拿到的是 privacy——它在此之前没有一条真实语料证据。两档只差
+        #    `timestamps` 一格，所以期望不必另抄一份敏感表：从同一个文件的
+        #    strict findings 按 category 分一下就是它的验收单。
+        p_dst = out_dir / (src.stem + ".privacy" + src.suffix)
+        d_dst = out_dir / (src.stem + ".default" + src.suffix)
+        p_code, p_out = run_moon(
+            moon,
+            ["redact", str(src), "--policy", "privacy", "-o", str(p_dst)],
+            repo,
+        )
+        if p_code != 0:
+            # strict 刚在同一个文件上写过产物：写不出 privacy 只可能是
+            # privacy 自己那档的问题。
+            bucket = "triage"
+            notes.append(
+                "privacy 在 strict 能改写的文件上退出码 {}: {}".format(
+                    p_code, p_out.strip()[:160]
+                )
+            )
+        else:
+            stats["privacy"] = stats.get("privacy", 0) + 1
+            before_input_p = sha256(src)
+
+            # "缺省就是 privacy"这句主张得用字节说：产物必须逐字节相同。
+            d_code, d_out = run_moon(
+                moon, ["redact", str(src), "-o", str(d_dst)], repo
+            )
+            if d_code != 0:
+                bucket = "triage"
+                notes.append(
+                    "不带 --policy 的 redact 退出码 {}: {}".format(
+                        d_code, d_out.strip()[:160]
+                    )
+                )
+            elif sha256(d_dst) != sha256(p_dst):
+                bucket = "triage"
+                notes.append("缺省策略的产物与 --policy privacy 逐字节不一致")
+
+            # 同策略闭合：拿 privacy 再审自己的产物，一条都不许剩
+            p_left = audit_findings(moon, repo, p_dst, "privacy")
+            if p_left:
+                bucket = "triage"
+                notes.append(
+                    "privacy 之后还剩 {} 条敏感条目：{}".format(
+                        len(p_left), [r["name"] for r in p_left][:8]
+                    )
+                )
+
+            p_residue, ts_lost = privacy_expectations(
+                findings, their, pillow_dirs(p_dst), explained
+            )
+            if p_residue:
+                bucket = "triage"
+                notes.append(
+                    "privacy 没删掉被点名的条目：{}".format(p_residue)
+                )
+            if ts_lost:
+                bucket = "triage"
+                notes.append(
+                    "privacy 把该保留的时间戳删了：{}".format(ts_lost)
+                )
+
+            for note in xmp_residue(
+                p_dst,
+                src_blob,
+                p_out,
+                stats,
+                policy="privacy",
+                redacted_key="redacted_privacy",
+                dropped_key="xmp_dropped_privacy",
+            ):
+                notes.append(note)
+                bucket = "triage"
+
+            if sha256(src) != before_input_p:
+                bucket = "triage"
+                notes.append("privacy 改动了输入文件本身")
+            if pixels_before is not None:
+                try:
+                    if pixel_hash(p_dst) != pixels_before:
+                        bucket = "triage"
+                        notes.append("privacy 动了像素")
+                except OSError as e:
+                    bucket = "triage"
+                    notes.append("privacy 产物解不开: {}".format(e))
     else:
         # 没有 EXIF 不等于没有元数据：整包 XMP 可以单独存在，
         # 而那种文件的逐条清单天然是空的。不单独跑这一趟，闸就永远绿。
@@ -522,6 +654,38 @@ def check_one(moon, repo, src, out_dir, stats):
                     except OSError as e:
                         bucket = "triage"
                         notes.append("产物解不开: {}".format(e))
+
+                # 默认策略在这一形状上同样是 carrier: true，而"13 个产物带着
+                # 第二份元数据"就出在这一形状上：privacy 必须在这里也摘干净。
+                p_dst = out_dir / (src.stem + ".privacy" + src.suffix)
+                p_code, p_out = run_moon(
+                    moon,
+                    ["redact", str(src), "--policy", "privacy", "-o", str(p_dst)],
+                    repo,
+                )
+                if p_code != 0:
+                    bucket = "triage"
+                    notes.append(
+                        "privacy 在只有 XMP 的文件上退出码 {}: {}".format(
+                            p_code, p_out.strip()[:160]
+                        )
+                    )
+                else:
+                    stats["privacy"] = stats.get("privacy", 0) + 1
+                    for note in xmp_residue(
+                        p_dst,
+                        src_blob,
+                        p_out,
+                        stats,
+                        policy="privacy",
+                        redacted_key="redacted_privacy",
+                        dropped_key="xmp_dropped_privacy",
+                    ):
+                        notes.append(note)
+                        bucket = "triage"
+                    if sha256(src) != before_input:
+                        bucket = "triage"
+                        notes.append("privacy 改动了输入文件本身")
 
     return bucket, notes
 
@@ -581,6 +745,13 @@ def main():
             stats.get("xmp_src", 0),
             stats.get("redacted", 0),
             stats.get("xmp_dropped", 0),
+        )
+    )
+    print(
+        "默认策略（privacy）：产物复查 {} 个，摘除并披露 {} 个"
+        "（分母与 strict 分开记，两档各验各的）".format(
+            stats.get("redacted_privacy", 0),
+            stats.get("xmp_dropped_privacy", 0),
         )
     )
     print(

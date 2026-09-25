@@ -321,16 +321,33 @@ moon test --target wasm-gc
 - **真实照片语料对拍。** 上面那些 fixture 是自己造的，尺子也在自己手里，所以另有
   `ci/crosscheck_real.py`：拿 99 张不为这个库造的照片（`ianare/exif-samples`：
   91 张 JPEG + 8 张裸 TIFF）一张一张和 Pillow 对——逐条编号两个方向都要一致，
-  然后 strict 脱敏，产物读回来、再审一遍、和输入比字节、和原图比像素。
-  分母先自证：扫到 99、Pillow 打得开 99、打不开 0。最近一次全量实测（约 12 分钟，
-  每个文件起一次 `moon run cmd/main`）：**ok 91 / refused-rewrite 8 / triage 0**。
+  然后**两档策略各脱一次敏**（`strict` 与 CLI 的缺省档 `privacy`），产物读回来、
+  再审一遍、和输入比字节、和原图比像素。
+  分母先自证：扫到 99、Pillow 打得开 99、打不开 0。最近一次全量实测 5 分 14 秒
+  （每个文件起 8 次 `moon run cmd/main`：读、strict 审、strict 脱、产物再读、
+  产物再审、privacy 脱、不带 `--policy` 脱、privacy 审；构建缓存已热）：
+  **ok 91 / refused-rewrite 8 / triage 0**。
   那 8 个是裸 TIFF，重写判据按设计主动拒绝，脚本同时要求"拒绝必须干净"——
   留下一个看着像产物的坏文件就落进 triage。XMP 那一关单独计数：语料里带包 35 个、
   产物复查 89 个、摘除并且被 CLI 说出来的 34 个。35 与 34 差的那个是
   Arbitro.tiff，它的包住在 IFD 条目里（逐条清单本来就看得见它），而裸 TIFF 按上面
   那句不重写；89 比 91 少的两个（olympus-d320l.jpg、sony-powershota5.jpg）是连
   Pillow 都读出 0 条的文件，两边在"这个文件没有元数据"上一致、因而不写产物，
-  它们的写侧没被这一趟验过。
+  它们的写侧没被这一趟验过。缺省档那一趟的分母单独打印，不与 strict 合并计数：
+  这一轮是 **产物复查 89 / 摘除并披露 34**，与 strict 同宽。
+  这一档以前一条真实语料证据都没有——四步写侧全跑在 strict 上，而用户不打
+  `--policy` 时拿到的恰好是 `privacy`。它的期望不另抄一份敏感表：两档只差
+  `timestamps` 一格，所以期望直接从同一个文件的 strict 审计结果按类别推
+  （非时间戳的被点名条目必须在产物里读不到了、时间戳条目 Pillow 在原图看得到
+  就还得在产物里看得到），再加一条逐字节比对钉住"缺省产物 == 显式
+  `--policy privacy` 的产物"。这四句都往库里注入过对应的坏并且确认它红：
+  `privacy_policy` 的 `timestamps` 改 true → "privacy 把该保留的时间戳删了"
+  （4 个文件）；`location` 改 false → "privacy 没删掉被点名的条目"（3 个）；
+  `carrier` 改 false → "privacy 之后产物里还有 XMP 包"（3 个，含只有 XMP
+  没有 EXIF 的那个分支）；`main.mbt` 的缺省策略改 strict → "缺省策略的产物与
+  --policy privacy 逐字节不一致"（4 个）。同策略闭合那一查（拿 privacy 再审
+  自己的产物）在 `location` 注入下**不**红——策略不针对地点时审计自然觉得
+  干净，这正是"闭合"与"独立量尺"两查都得在场的原因。
   两处分歧最后查下来是量尺的问题，脚本按文件打印字节证据后才归因：
   Canon_DIGITAL_IXUS_400.jpg 的 IFD0 里 Pillow 多报 1 条 274，那个值住在 XMP 包里；
   kodak-dc210.jpg 我们多报 2 条 (270, 33432)，那是 count=0 的空声明，Pillow 不列。
@@ -340,17 +357,23 @@ moon test --target wasm-gc
   本仓库造的）扫了一遍：字节里有 `eXIf` 块或有 XMP 包标记的只有 5 张（0.8%，
   其余 633 张两种标记都不在）——PNG 生态里 `eXIf` 本来就薄，
   这条限制现在有数了。那 5 张跑的是同一个脚本：**ok 5 / triage 0**，XMP 闸
-  4 带包 / 5 产物复查 / 4 摘除并披露，`xmp` 键复核 5 份，量尺归因 0 格。
+  4 带包 / 5 产物复查 / 4 摘除并披露，缺省档那一趟同样是 5 产物复查 / 4 摘除并披露，
+  `xmp` 键复核 5 份，量尺归因 0 格。
   PNG 的两种形状各撞到一次：`exif.png` 是外部工具写的真 `eXIf` 块（Pillow 读出
   1 条 274，我们读出同一条，逐条比对真的跑起来了）；另外 4 张只有住在
   `tEXt`/`iTXt` 里的 XMP 包——那种文件 Pillow 会从包里造出一个 `Orientation`，
   而我们的 `exif` 键说 false，走的正是"没有 EXIF 不等于没有元数据"那条分支。
-  对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 25 个用例（实测 25 passed、
-  rc=0）。今天还按 `.github/workflows/ci.yml` 的 `cli` 作业把六步在本机整条复跑了一遍
+  对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 33 个用例（实测 33 passed、
+  rc=0）。其中 8 个钉的是缺省档那条纯判据——"时间戳被误删"这一格在正常库里
+  永远是空的，语料全绿不说明它在工作，所以四个门槛各往宽里改过一次（去掉
+  "原图看得到"那一前置、去掉归因豁免、让归因豁免渗到残留方向、按目录比改成
+  拿裸编号跨目录比），每一次都由指名用例接住。
+  今天还按 `.github/workflows/ci.yml` 的 `cli` 作业把六步在本机整条复跑了一遍
   （造 fixture → Pillow 读回 → 12 次命令行 → Pillow 验收脱敏结果 → 对拍脚本 → 自测），
   每一步退出码都是 0；其中对拍脚本对着 fixture 目录跑（CLI 那一步留下的产物一并算进去
-  共 12 份）报 ok 11 / 按设计拒绝 1，XMP 闸 2 带包 / 7 产物复查 / 2 摘除并披露，
-  `xmp` 键复核 12 份，GPS 指针挂在 Exif 里 15 格。
+  共 13 份，输出目录像计划文件那样放在语料目录之外，否则上一轮的产物会被这一轮当语料）
+  报 ok 12 / 按设计拒绝 1，XMP 闸 2 带包 / 7 产物复查 / 2 摘除并披露，
+  缺省档同样是 7 产物复查 / 2 摘除并披露，`xmp` 键复核 12 份，GPS 指针挂在 Exif 里 15 格。
 - **畸形输入的性质测试。** `moonmeta_fuzz_test.mbt` 不用随机数：7 个种子文件的
   每一个前缀、每一个字节的 8 种单字节改写、再加尾部追加，共 12000 份输入，
   每份都过 `sniff` / `decode_any` / `describe_container` / `redact_any` /
