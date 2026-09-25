@@ -690,6 +690,21 @@ def check_one(moon, repo, src, out_dir, stats):
     return bucket, notes
 
 
+def out_dir_inside_corpus(corpus, out_dir):
+    """产物目录落在语料目录里面吗？（含同一个目录这一种）
+
+    落在里面，这一轮写的 `.redacted` / `.privacy` / `.default` 就成了下一轮
+    的语料：本机实测一次把 fixture 的 13 份扫成 33 份，"语料 99 张"这种分母
+    就是这么被自己的产物顶上去的。
+    """
+    try:
+        c = Path(corpus).resolve()
+        o = Path(out_dir).resolve()
+    except OSError:
+        return False
+    return c == o or c in o.parents
+
+
 def main():
     ap = argparse.ArgumentParser(description="真实照片语料对拍")
     ap.add_argument("corpus", help="语料目录（递归扫，只读）")
@@ -704,6 +719,14 @@ def main():
         print("语料目录不存在：{}".format(corpus))
         return 2
     out_dir = Path(args.out) if args.out else repo / ".scratch" / "crosscheck"
+    if out_dir_inside_corpus(corpus, out_dir):
+        print(
+            "输出目录 {} 落在语料目录 {} 里面：这一轮写的产物会被当成下一轮的"
+            "语料，扫到的份数就不再是语料的分母了。请把 -o 指到语料之外。".format(
+                out_dir, corpus
+            )
+        )
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
 
     files = sorted(

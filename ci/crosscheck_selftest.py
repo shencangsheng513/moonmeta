@@ -13,7 +13,9 @@
     python ci/crosscheck_selftest.py -v
 """
 
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from crosscheck_real import (  # noqa: E402
     XMP_MARKS,
     gps_via_exif_pointer,
     nested_gps_entries,
+    out_dir_inside_corpus,
     privacy_expectations,
     xmp_flag_problems,
     xmp_injected,
@@ -296,6 +299,39 @@ class PrivacyExpectations(unittest.TestCase):
         )
         self.assertEqual(res, [("Interop", 1, "InteropIndex")])
         self.assertEqual(lost, [])
+
+
+class OutDirNesting(unittest.TestCase):
+    """产物目录不许落在语料目录里面，否则分母是自己喂出来的。
+
+    今天真踩了一次：fixture 那一轮把 `-o` 指到语料目录下，扫到 33 份，
+    而按计划文件复跑时同一批 fixture 只有 13 份。
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.corpus = self.root / "fix"
+        self.corpus.mkdir()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_产物目录是语料的子目录_算嵌套(self):
+        self.assertTrue(
+            out_dir_inside_corpus(self.corpus, self.corpus / "cross-out")
+        )
+
+    def test_产物目录就是语料目录_也算(self):
+        self.assertTrue(out_dir_inside_corpus(self.corpus, self.corpus))
+
+    def test_兄弟目录不算(self):
+        self.assertFalse(
+            out_dir_inside_corpus(self.corpus, self.root / "cross")
+        )
+
+    def test_产物目录是语料的上一级也不算(self):
+        # 语料在 fix/ 里、产物写到根：根下面确实还有别的图片，但那不是这一轮写的
+        self.assertFalse(out_dir_inside_corpus(self.corpus, self.root))
 
 
 if __name__ == "__main__":
