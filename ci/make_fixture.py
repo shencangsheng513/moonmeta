@@ -106,11 +106,51 @@ def build_exif_block():
     return header + gps_bytes + exif_bytes + ifd0_bytes
 
 
-def main():
-    """写三份 fixture：带 EXIF 的 JPEG、带 EXIF 的 PNG、不带 EXIF 的 TIFF。
+XMP_URI = b"http://ns.adobe.com/xap/1.0/"
 
-    第三份是"本来就没有"那条分支的对照：脱敏工具把"已清除"和"无需清除"
-    混为一谈，用户就再没有信任它的理由了。
+
+def xmp_packet():
+    """一个装着第二份敏感事实的 XMP 包。
+
+    键名抄自真实语料里最常见的那几个：拍摄时间、署名、机身序列号。
+    逐条 IFD 清单永远不会出现它们——这正是漏的表现形式。
+    """
+    body = (
+        b'<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>'
+        b'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        b"<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+        b'<rdf:Description xmlns:exif="http://ns.adobe.com/exif/1.0/"'
+        b' exif:DateTimeOriginal="2026:09:24 15:51:00"'
+        b' exif:GPSLatitude="31,13.500000N"/>'
+        b'<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/"'
+        b'><dc:creator><rdf:Seq><rdf:li>Zhang San</rdf:li></rdf:Seq></dc:creator>'
+        b"</rdf:Description>"
+        b'<rdf:Description xmlns:aux="http://ns.adobe.com/exif/1.0/aux/"'
+        b' aux:SerialNumber="BODY-0001234567"/>'
+        b"</rdf:RDF></x:xmpmeta>"
+    )
+    return XMP_URI + b"\x00" + body
+
+
+def insert_after_app0(data, payload):
+    """把一段 APP1 插在 JFIF 之后——于是它排在 APP1/EXIF 前面。
+
+    故意用这种段序：只按"第一个 APP1"找 EXIF 的实现会在这里翻车。
+    """
+    assert data[:2] == b"\xff\xd8", "不是 JPEG"
+    assert data[2:4] == b"\xff\xe0", "开头不是 JFIF 段"
+    pos = 4 + struct.unpack(">H", data[4:6])[0]
+    seg = b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
+    return data[:pos] + seg + data[pos:]
+
+
+def main():
+    """写五份 fixture：带/不带 EXIF、带/不带 XMP 的组合。
+
+    cross_xmp.jpg 与 xmp_only.jpg 是真实语料逼出来的两种形状——
+    脱敏工具只看 IFD 条目的话，这两种文件的产物里会留着整套第二份元数据。
+    最后那份 TIFF 是"本来就没有"那条分支的对照：脱敏工具把"已清除"和
+    "无需清除"混为一谈，用户就再没有信任它的理由了。
     """
     block = build_exif_block()
     img = Image.new("RGB", (24, 16), (200, 40, 40))
@@ -118,7 +158,23 @@ def main():
     img.save(OUT / "cross.png", "PNG", exif=block)
     img.save(OUT / "cross.tiff", "TIFF")
     (OUT / "exif_block.bin").write_bytes(block)
-    print("wrote", OUT / "cross.jpg", OUT / "cross.png", OUT / "cross.tiff")
+
+    plain = OUT / "_plain.jpg"
+    img.save(plain, "JPEG")
+    bare = plain.read_bytes()
+    (OUT / "xmp_only.jpg").write_bytes(insert_after_app0(bare, xmp_packet()))
+    with_exif = (OUT / "cross.jpg").read_bytes()
+    (OUT / "cross_xmp.jpg").write_bytes(insert_after_app0(with_exif, xmp_packet()))
+    plain.unlink()
+
+    print(
+        "wrote",
+        OUT / "cross.jpg",
+        OUT / "cross.png",
+        OUT / "cross.tiff",
+        OUT / "xmp_only.jpg",
+        OUT / "cross_xmp.jpg",
+    )
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ test "块表逐块可查，eXIf 载荷正好是那段 TIFF" {
   let map = png_inspect_ok(file)
   @test.assert_eq(
     map.describe(),
-    "PNG IHDR@8(13B) eXIf@33(226B) tEXt@271(30B) IDAT@313(4B) IEND@329(0B) ; 另含 XMP，本版本不解析也不删除",
+    "PNG IHDR@8(13B) eXIf@33(226B) tEXt@271(30B) IDAT@313(4B) IEND@329(0B) ; 另含 XMP 文本块",
   )
   @test.assert_eq(map.has_xmp, true)
   match map.exif {

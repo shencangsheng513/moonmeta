@@ -1,19 +1,23 @@
 ///|
 /// 解析一个字节流时能出错的每一种方式。
 ///
-/// 每条错误都带偏移：报"坏了"不够，要能指出坏在第几个字节，
-/// 否则用户拿到的是一个无法追问的失败。
+/// 每条错误都带定位信息。报"坏了"不够，要能指出坏在哪里，
+/// 否则用户拿到的是一个无法追问的失败：
+/// 读字节流时错的都带字节偏移，回写时错的都带所在条目的 tag。
 pub suberror MetaError {
-  /// 字节流比声明的长度短：(需要, 实有)
-  TooShort(Int, Int)
+  /// 字节流比声明的长度短：(偏移, 需要, 实有)
+  /// 偏移是这次读取想落在的位置；它已经落在块外时实有记 0。
+  TooShort(Int, Int, Int)
   /// TIFF 头不在给定偏移处：(偏移)
   BadTiffHeader(Int)
   /// 字节序标记既不是 "II" 也不是 "MM"：(偏移)
   BadByteOrder(Int)
   /// IFD 偏移指向块外：(偏移)
   IfdOffsetOutOfRange(Int64)
-  /// 条目声明的字节数超过剩余空间：(tag, 声明, 可用)
-  EntryTooLarge(Int, Int, Int)
+  /// 条目声明的字节数超过剩余空间：(偏移, tag, 声明, 可用)
+  /// 偏移与可用配对：偏移 + 可用 = 块长。整张目录表放不下时没有具体条目，
+  /// tag 记 0，偏移就是表体的第一字节。
+  EntryTooLarge(Int, Int, Int, Int)
   /// 条目的值偏移落在块外：(tag, 偏移)
   ValueOffsetOutOfRange(Int, Int64)
   /// 规范里有、但本版本还不打算解的类型：(tag, 类型码)
@@ -40,6 +44,9 @@ pub suberror MetaError {
   NotPng(Int)
   /// PNG 块的 CRC 与字节对不上：(块偏移, 声明, 实算)
   BadChecksum(Int, Int64, Int64)
+  /// 裸 TIFF 的字节不止元数据：重建只能覆盖一部分，写回去就是丢掉其余
+  /// （通常是像素数据）。拒绝写回：(IFD0 偏移, 文件长度, 重建长度)
+  TiffNotByteExact(Int64, Int, Int)
   /// 开头既不是 JPEG 也不是 PNG 也不是 TIFF：(偏移)
   UnknownFormat(Int)
 } derive(Debug)
@@ -47,9 +54,9 @@ pub suberror MetaError {
 ///|
 pub impl Show for MetaError with fn output(self : MetaError, logger) {
   match self {
-    TooShort(need, have) =>
+    TooShort(off, need, have) =>
       logger.write_string(
-        "need \{need} byte(s) but the block holds only \{have}",
+        "need \{need} byte(s) at offset \{off} but the block holds only \{have}",
       )
     BadTiffHeader(off) =>
       logger.write_string("no TIFF header ('II' or 'MM') at offset \{off}")
@@ -61,9 +68,9 @@ pub impl Show for MetaError with fn output(self : MetaError, logger) {
       logger.write_string(
         "IFD offset \{off} points outside the block or is misaligned",
       )
-    EntryTooLarge(tag, declared, available) =>
+    EntryTooLarge(off, tag, declared, available) =>
       logger.write_string(
-        "tag \{tag_hex(tag)} declares \{declared} byte(s), only \{available} left",
+        "tag \{tag_hex(tag)} at offset \{off} declares \{declared} byte(s), only \{available} left",
       )
     ValueOffsetOutOfRange(tag, off) =>
       logger.write_string(
@@ -116,6 +123,10 @@ pub impl Show for MetaError with fn output(self : MetaError, logger) {
     BadChecksum(off, declared, computed) =>
       logger.write_string(
         "chunk at offset \{off} declares CRC \{hex32(declared)} but its bytes hash to \{hex32(computed)}",
+      )
+    TiffNotByteExact(ifd0, len, rebuilt) =>
+      logger.write_string(
+        "refusing to rewrite this bare TIFF: its IFD0 sits at offset \{ifd0}, and the file's \{len} byte(s) are not what the metadata model rebuilds (\{rebuilt} byte(s)); the difference is bytes the model does not hold, and writing would drop them",
       )
     UnknownFormat(off) =>
       logger.write_string(

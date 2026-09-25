@@ -2,7 +2,7 @@
 //
 // `audit` 和 `read` 打印的每一行都从这里取词。名字打错或漏掉，
 // 用户看到的就是"某个不认识的编号被删了"——这份报告也就没人敢照着签字。
-// 所以这里把 README 承诺的 57 个规范名逐个钉死。
+// 所以这里把 README 承诺的 64 个规范名逐个钉死。
 
 ///|
 fn check(dir : @moonmeta.Dir, id : Int, want : String) -> Unit raise {
@@ -10,7 +10,7 @@ fn check(dir : @moonmeta.Dir, id : Int, want : String) -> Unit raise {
 }
 
 ///|
-/// 本包有规范名的全部编号：IFD0 11 个、Exif 14 个、GPS 32 个。
+/// 本包有规范名的全部编号：IFD0 14 个、Exif 14 个、GPS 32 个、Interop 4 个。
 test "规范名表：README 报出的编号与名字逐条对得上" {
   let ifd0 : Array[(Int, String)] = [
     (0x010f, "Make"),
@@ -21,6 +21,9 @@ test "规范名表：README 报出的编号与名字逐条对得上" {
     (0x013b, "Artist"),
     (0x0201, "JPEGInterchangeFormat"),
     (0x0202, "JPEGInterchangeFormatLength"),
+    (0x02bc, "XMP"),
+    (0x02bd, "PhotoshopSettings"),
+    (0x8773, "IptcNaa"),
     (0x8298, "Copyright"),
     (0x8769, "ExifOffset"),
     (0x8825, "GPSInfo"),
@@ -87,18 +90,33 @@ test "规范名表：README 报出的编号与名字逐条对得上" {
     let (id, name) = e
     check(@moonmeta.Gps, id, name)
   }
-  @test.assert_eq(ifd0.length() + exif.length() + gps.length(), 57)
+  let interop : Array[(Int, String)] = [
+    (0x0001, "InteropIndex"),
+    (0x0002, "InteropVersion"),
+    (0x1001, "RelatedImageWidth"),
+    (0x1002, "RelatedImageHeight"),
+  ]
+  for e in interop {
+    let (id, name) = e
+    check(@moonmeta.Interop, id, name)
+  }
+  @test.assert_eq(
+    ifd0.length() + exif.length() + gps.length() + interop.length(),
+    // 上面四张期望清单的条目总数；新增要点名的 tag 时同步加。
+    64,
+  )
 }
 
 ///|
 /// 表外的编号必须打回十六进制。
 ///
-/// 三个目录共用一套编号空间：同一个数字在 IFD0 和 Exif 下是两个不同的 tag。
+/// 四个目录共用一套编号空间：同一个数字在 IFD0 和 Exif 下是两个不同的 tag。
 /// 拿别的目录的名字来填，等于在报告里指一个不存在的位置。
 test "查不到名字就回吐编号，不拿别的目录凑" {
   check(@moonmeta.Exif, 0xea1c, "0xea1c")
   check(@moonmeta.Ifd0, 0x9003, "0x9003")
   check(@moonmeta.Gps, 0x00ff, "0x00ff")
+  check(@moonmeta.Interop, 0x2000, "0x2000")
 }
 
 ///|

@@ -40,12 +40,19 @@ pub extend JpegSegment with @debug.Debug::{to_repr}
 ///|
 /// 段表。
 ///
-/// `exif` 是 APP1 里那段 TIFF 块的 `[起, 止)`；`has_xmp` 是"这个文件还带着
-/// XMP，本版本不碰它"的诚实交代——脱敏工具最怕让人以为已经删干净了。
+/// `exif` 是 APP1 里那段 TIFF 块的 `[起, 止)`；`xmp` 是每一段 APP1/XMP 的位置。
+/// 记下来是为了如实交代：XMP 里常是同一批事实的第二份副本，
+/// 逐条清单看不见它，脱敏工具最怕让人以为已经删干净了。
 pub(all) struct JpegMap {
   segments : Array[JpegSegment]
   exif : (Int, Int)?
   has_xmp : Bool
+  /// 每一段 APP1/XMP 的 `[起, 止)`，含段码与长度域。
+  ///
+  /// 走查时才知道确切的边界（段边界之前可能有任意多个 0xff 填充），
+  /// 所以在这里记下来，删除时不再重新推导一遍。
+  /// `has_xmp` 与它是同一件事的两种问法：`has_xmp == !xmp.is_empty()`。
+  xmp : Array[(Int, Int)]
 } derive(Debug, Eq)
 
 ///|
@@ -67,6 +74,7 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
   let segments : Array[JpegSegment] = [{ marker: 0xd8, offset: 0, length: 2, }]
   let mut exif : (Int, Int)? = None
   let mut has_xmp = false
+  let xmp_spans : Array[(Int, Int)] = []
   let mut p = 2
   let mut scan_end = n
   let mut done = false
@@ -114,6 +122,7 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
             }
           } else if starts_with(data, payload, xmp_head) {
             has_xmp = true
+            xmp_spans.push((p, p + span))
           }
         }
         segments.push({ marker, offset: p, length: span, })
@@ -122,7 +131,7 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
     }
   }
   check_no_metadata_after(data, scan_end)
-  { segments, exif, has_xmp, }
+  { segments, exif, has_xmp, xmp: xmp_spans, }
 }
 
 ///|
@@ -219,20 +228,61 @@ pub fn jpeg_remove_exif(data : Bytes) -> (Bytes, Bool) raise MetaError {
 }
 
 ///|
+/// 整段摘掉 APP1/XMP，并报告"原本确实有一段"。
+///
+/// 为什么必须动这一段：XMP 里是同一批事实的第二份副本——真实语料里
+/// `exif:DateTimeOriginal`、`tiff:Make/Model`、`dc:creator`、`aux:SerialNumber`
+/// 都出现过。EXIF 删干净、XMP 原样留着，报告上一切正常，实际什么都没脱。
+///
+/// 做法是"把这些段的补集原样搬过去"，不是"重建文件"：压缩流、量化表、
+/// 注释段一概不重新编码，所以像素不可能被动到。
+pub fn jpeg_drop_xmp(data : Bytes) -> (Bytes, Bool) raise MetaError {
+  let map = jpeg_inspect(data)
+  if map.xmp.is_empty() {
+    (data, false)
+  } else {
+    let body = data.to_array()
+    let out : Array[Byte] = []
+    let mut cursor = 0
+    for (s, e) in map.xmp {
+      push_all(out, body, cursor, s)
+      cursor = e
+    }
+    push_all(out, body, cursor, body.length())
+    (Bytes::from_array(out), true)
+  }
+}
+
+///|
 /// 解析 → 按策略删 → 回写，一步到位。没有 EXIF 的文件原样退回。
 pub fn jpeg_redact(
   data : Bytes,
   p : Policy,
 ) -> (Bytes, Redaction) raise MetaError {
   let map = jpeg_inspect(data)
-  match map.exif {
-    None => (data, { removed: [], dropped_thumbnail: false, })
+  let (out, report) = match map.exif {
+    None =>
+      (data, { removed: [], dropped_thumbnail: false, dropped_xmp: false, })
     Some((s, e)) => {
       let block = decode_tiff(slice_bytes(data, s, e))
       let (kept, report) = block.redact(p)
-      let tiff = encode_tiff(kept)
-      (jpeg_replace_exif(data, tiff), report)
+      // 一条没删就不重写这个段：我们的编码器按自己的布局排偏移，
+      // 和相机原来的字节布局不保证相同（实测重编码会长 4 个字节）。
+      // 空策略必须是恒等，不能顺手把文件规范化一遍。
+      if report.removed.is_empty() && !report.dropped_thumbnail {
+        (data, report)
+      } else {
+        (jpeg_replace_exif(data, encode_tiff(kept)), report)
+      }
     }
+  }
+  // 第二趟重新走查一遍，不沿用第一趟的偏移：EXIF 段的长度已经变了，
+  // 记在旧偏移上的 XMP 段位置这时候是错的。
+  if !p.covers(Carrier) {
+    (out, report)
+  } else {
+    let (out2, dropped) = jpeg_drop_xmp(out)
+    (out2, { ..report, dropped_xmp: dropped, })
   }
 }
 
@@ -359,7 +409,7 @@ pub fn JpegMap::describe(self : JpegMap) -> String {
     head = head + " \{s.name()}@\{s.offset}"
   }
   if self.has_xmp {
-    head + " ; 另含 XMP，本版本不解析也不删除"
+    head + " ; 另含 XMP 包 \{self.xmp.length()} 段"
   } else {
     head
   }

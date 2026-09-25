@@ -25,7 +25,7 @@ pub extend IfdEntry with Eq::{not_equal, equal}
 pub extend IfdEntry with @debug.Debug::{to_repr}
 
 ///|
-/// 解析结果：TIFF 头的字节序 + 三个目录。
+/// 解析结果：TIFF 头的字节序 + 四个目录。
 ///
 /// `ifd0` 里**不含** `0x8769`/`0x8825` 这两个子目录指针——它们是结构而不是
 /// 数据，解析时被消费掉，回写时按新布局重算，所以
@@ -34,11 +34,16 @@ pub extend IfdEntry with @debug.Debug::{to_repr}
 /// `has_ifd1` 记录原文件是否有缩略图目录。它只是"这里曾经有过一张缩略图"
 /// 的记号：回写时缩略图链连同它的字节一起丢弃，这是**有意**的行为——
 /// 留着缩略图的"脱敏"结果仍然可能泄露原始 GPS 与机身信息。
+///
+/// `interop` 是 Exif 子目录下的 Interoperability IFD。它曾经是"指针 tag，
+/// 消费掉就完事"，结果回写时整张表凭空消失——真实语料对拍里 44 个文件
+/// 都少了这一张表，所以它现在和另三张一样进 IR、一样重发。
 pub(all) struct TiffBlock {
   little : Bool
   ifd0 : Array[IfdEntry]
   exif : Array[IfdEntry]
   gps : Array[IfdEntry]
+  interop : Array[IfdEntry]
   has_ifd1 : Bool
 } derive(Debug, Eq)
 
@@ -65,14 +70,14 @@ pub let tag_thumb_offset : Int = 0x0201
 pub let tag_thumb_length : Int = 0x0202
 
 ///|
-/// Interop 子目录指针。本版本不建模 Interop IFD，解析时消费掉、回写时不再出现。
+/// Interop 子目录指针。指向第四张表，解析时进 `TiffBlock.interop`。
 pub let tag_interop_ifd : Int = 0xa005
 
 ///|
 /// 从一个 TIFF 字节块解析。`data` 的第一字节必须是 `I`/`M`。
 pub fn decode_tiff(data : Bytes) -> TiffBlock raise MetaError {
   if data.length() < 8 {
-    raise TooShort(8, data.length())
+    raise TooShort(0, 8, data.length())
   }
   let b0 = byte_at(data, 0)
   let b1 = byte_at(data, 1)
@@ -100,13 +105,22 @@ pub fn decode_tiff(data : Bytes) -> TiffBlock raise MetaError {
     Some(off) => parse_dir(data, off, little)
     None => { entries: [], next: 0L, }
   }
+  let interop_dir = match
+    sub_dir_offset(data, exif_dir.entries, tag_interop_ifd) {
+    Some(off) => parse_dir(data, off, little)
+    None => { entries: [], next: 0L, }
+  }
   // 指针 tag 是结构不是数据，不进 IR；各目录的后继（缩略图链）只留一个记号。
   {
     little,
     ifd0: without(dir0.entries, [tag_exif_ifd, tag_gps_ifd]),
     exif: without(exif_dir.entries, [tag_gps_ifd, tag_exif_ifd, tag_interop_ifd]),
     gps: gps_dir.entries,
-    has_ifd1: dir0.next > 0L || exif_dir.next > 0L || gps_dir.next > 0L,
+    interop: interop_dir.entries,
+    has_ifd1: dir0.next > 0L ||
+    exif_dir.next > 0L ||
+    gps_dir.next > 0L ||
+    interop_dir.next > 0L,
   }
 }
 
@@ -127,7 +141,7 @@ fn parse_dir(
   let avail = data.length() - dir_off - 2
   if count > avail / 12 {
     // 声明的条目表比剩余字节还长：直接拒绝，不进入逐条读取。
-    raise EntryTooLarge(0, count * 12, avail)
+    raise EntryTooLarge(dir_off + 2, 0, count * 12, avail)
   }
   let entries : Array[IfdEntry] = []
   for i = 0; i < count; i = i + 1 {
@@ -170,8 +184,12 @@ fn parse_entry(
     off.to_int()
   }
   let have = data.length() - voff
+  // 走到这里两处前置检查都已经保证 total <= have（内联值：parse_dir 保证表体
+  // 落在块内；外部值：上面那道指针检查）。这一道是重复的，留着是因为它是
+  // decode_value 逐字节读之前最后一道长度闸——没有测试能走到这里，
+  // 别把它当成"被测过的行为"。
   if total > have.to_int64() {
-    raise EntryTooLarge(tag, total.to_int(), have)
+    raise EntryTooLarge(voff, tag, total.to_int(), have)
   }
   {
     tag,
@@ -404,6 +422,7 @@ fn byte_at(data : Bytes, off : Int) -> Byte raise MetaError {
     Some(b) => b
     None =>
       raise TooShort(
+        off,
         1,
         if off < 0 || off >= data.length() {
           0

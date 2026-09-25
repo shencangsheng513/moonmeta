@@ -28,26 +28,36 @@ pub fn encode_tiff(block : TiffBlock) -> Bytes raise MetaError {
   let dir0 = entries_of(block.ifd0, true, little)
   let dire = entries_of(block.exif, false, little)
   let dirg = entries_of(block.gps, false, little)
-  let has_e = dire.length() > 0
+  let diri = entries_of(block.interop, false, little)
   let has_g = dirg.length() > 0
+  let has_i = diri.length() > 0
+  // 只有 Interop 没有别的 Exif 条目时也得造一张 Exif 表：0xA005 挂在那里。
+  let has_e = dire.length() > 0 || has_i
   if has_e {
     dir0.push(ptr_entry(tag_exif_ifd, 0))
   }
   if has_g {
     dir0.push(ptr_entry(tag_gps_ifd, 1))
   }
+  if has_i {
+    dire.push(ptr_entry(tag_interop_ifd, 2))
+  }
   dir0.sort_by(by_tag)
   dire.sort_by(by_tag)
   dirg.sort_by(by_tag)
+  diri.sort_by(by_tag)
   let size0 = 2 + 12 * dir0.length() + 4
   let size_e = 2 + 12 * dire.length() + 4
   let size_g = 2 + 12 * dirg.length() + 4
+  let size_i = 2 + 12 * diri.length() + 4
   let offe = 8 + size0
   let offg = offe + (if has_e { size_e } else { 0 })
-  let vstart = offg + (if has_g { size_g } else { 0 })
+  let offi = offg + (if has_g { size_g } else { 0 })
+  let vstart = offi + (if has_i { size_i } else { 0 })
   let (p0, cur) = plan_dir(dir0, vstart)
   let (pe, cur2) = plan_dir(dire, cur)
-  let (pg, _) = plan_dir(dirg, cur2)
+  let (pg, cur3) = plan_dir(dirg, cur2)
+  let (pi, _) = plan_dir(diri, cur3)
   let out : Array[Byte] = []
   if little {
     out.push(b'I')
@@ -58,7 +68,7 @@ pub fn encode_tiff(block : TiffBlock) -> Bytes raise MetaError {
   }
   put_u16(out, 42, little)
   put_u32(out, 8L, little)
-  let sub_offs = [offe, offg]
+  let sub_offs = [offe, offg, offi]
   emit_dir(out, p0, sub_offs, little)
   if has_e {
     emit_dir(out, pe, sub_offs, little)
@@ -66,7 +76,10 @@ pub fn encode_tiff(block : TiffBlock) -> Bytes raise MetaError {
   if has_g {
     emit_dir(out, pg, sub_offs, little)
   }
-  emit_values(out, p0, pe, pg, vstart)
+  if has_i {
+    emit_dir(out, pi, sub_offs, little)
+  }
+  emit_values(out, [p0, pe, pg, pi], vstart)
   Bytes::from_array(out)
 }
 
@@ -162,22 +175,18 @@ fn emit_dir(
 }
 
 ///|
+/// 值区：按目录顺序把外部值依次落位。传目录列表而不是逐个参数，
+/// 是为了让"加了第四张表却忘了写它的值"这类错误不可能发生。
 fn emit_values(
   out : Array[Byte],
-  p0 : Array[Planned],
-  pe : Array[Planned],
-  pg : Array[Planned],
+  dirs : Array[Array[Planned]],
   vstart : Int,
 ) -> Unit {
   let mut written = vstart
-  for p in p0 {
-    written = spill(out, p, written)
-  }
-  for p in pe {
-    written = spill(out, p, written)
-  }
-  for p in pg {
-    written = spill(out, p, written)
+  for d in dirs {
+    for p in d {
+      written = spill(out, p, written)
+    }
   }
 }
 

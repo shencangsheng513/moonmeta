@@ -36,7 +36,8 @@ fn describe(r : Request) -> String {
     Some(o) => o
   }
   let force = if r.force { " force" } else { "" }
-  "\{action} \{r.path} \{r.policy} -o=\{out}\{force}"
+  let json = if r.json { " json" } else { "" }
+  "\{action} \{r.path} \{r.policy} -o=\{out}\{force}\{json}"
 }
 
 ///|
@@ -149,6 +150,50 @@ test "缩略图那句话只在真丢了的时候说" {
 }
 
 ///|
+test "XMP 那句话说的是三件事，不是一件事" {
+  // 摘掉了：要报告，否则下一次没人知道这里原本有过一整包元数据
+  @test.assert_eq(xmp_note(true, true), "，并整包摘除 XMP")
+  // 策略不覆盖：要警告，否则"删除 12 条"读起来像已经干净了
+  @test.assert_eq(
+    xmp_note(true, false),
+    "；警告：XMP 包还在，当前策略不碰它",
+  )
+  // 本来就没有：一个字都不许多说
+  @test.assert_eq(xmp_note(false, false), "")
+  // 三态两两不同：摘除、警告、无事可做不能折叠成同一句
+  @test.assert_eq(xmp_note(true, true) != xmp_note(true, false), true)
+  @test.assert_eq(xmp_note(true, false) != xmp_note(false, false), true)
+}
+
+///|
+/// 这句话问的是策略，不是"删了没有"：内置的 privacy / strict 都覆盖载体，
+/// 但在库里自己拼 `Policy` 的人能让它不覆盖。那时候若还说"会整包摘除"，
+/// 就是替用户许下一个策略并没有许的承诺。
+test "carrier_note 跟着策略走，不跟着默认值走" {
+  @test.assert_eq(
+    carrier_note(@lib.strict_policy()),
+    "另含 XMP 包：逐条清单里看不到它；策略覆盖载体，会整包摘除。",
+  )
+  let warning = carrier_note(@lib.empty_policy())
+  assert_true(warning.contains("当前策略不碰它"))
+  @test.assert_eq(warning == carrier_note(@lib.strict_policy()), false)
+}
+
+///|
+/// `read` 只摊开 EXIF 目录。没有 EXIF 不等于没有元数据，
+/// 所以"没有 EXIF"那一句后面必须把包着的那一份补上。
+test "read 不许把没有 EXIF 说成没有元数据" {
+  @test.assert_eq(
+    read_xmp_note(false),
+    "  但容器里另有一包 XMP：read 只摊开 EXIF 目录，包里的东西用 audit 看。",
+  )
+  @test.assert_eq(
+    read_xmp_note(true),
+    "  另含 XMP 包：read 不摊开它，逐条清单里也永远不会出现它。",
+  )
+}
+
+///|
 test "tag 编号补齐到四位十六进制" {
   @test.assert_eq(hex_tag(0x0002), "0x0002")
   @test.assert_eq(hex_tag(0x927c), "0x927c")
@@ -171,4 +216,152 @@ test "裸命令、未知子命令、缺文件名：三种失败各有各的出�
   @test.assert_eq(act(["nope", "x"]), "解析失败")
   // 认得出子命令却没给文件：这才轮到请求层说"我不知道该干什么"
   @test.assert_eq(act(["read"]), "无请求")
+}
+
+///|
+/// 手搓一个块。编号 2 在 IFD0 没有规范名（回吐 `0x0002`），
+/// 在 GPS 目录是 `GPSLatitude`；编号 1 在 GPS 是 `GPSLatitudeRef`，
+/// 在 Interop 目录是 `InteropIndex`——名字是按条目所在目录查的，
+/// 写死一个目录就会成片报错名字。Interop 留一条真条目，是为了让金标准里
+/// 第四张表的位置、标签拼写、名字查表三件事一起被钉住。
+fn block(little : Bool, gps : Array[@lib.IfdEntry]) -> @lib.TiffBlock {
+  {
+    little,
+    ifd0: [{ tag: 2, type_code: 3, value: @lib.Shorts([8]), }],
+    exif: [],
+    gps,
+    interop: [{ tag: 1, type_code: 2, value: @lib.Text("R98"), }],
+    has_ifd1: false,
+  }
+}
+
+///|
+/// 整行断言，不是"包含某个子串"：键序、括号、每处转义都在比对范围内。
+/// 这份输出是对外承诺的机读格式，改一个字就算破坏兼容。
+test "read --json 是金标准：四个目录、键序固定、查名字各按各的目录" {
+  let want = "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"exif\":true,\"byte_order\":\"II\",\"directories\":[{\"dir\":\"IFD0\",\"entries\":[{\"tag\":2,\"name\":\"0x0002\",\"type\":3,\"value\":\"Shorts(1 value(s))\"}]},{\"dir\":\"Exif\",\"entries\":[]},{\"dir\":\"GPS\",\"entries\":[{\"tag\":2,\"name\":\"GPSLatitude\",\"type\":5,\"value\":\"Rationals(0 value(s))\"}]},{\"dir\":\"Interop\",\"entries\":[{\"tag\":1,\"name\":\"InteropIndex\",\"type\":2,\"value\":\"\\\"R98\\\"\"}]}],\"has_ifd1\":false,\"gps\":null}"
+  let got = read_json(
+    "x.jpg",
+    @lib.Jpeg,
+    Some(block(true, [{ tag: 2, type_code: 5, value: @lib.Rationals([]), }])),
+    false,
+  )
+  @test.assert_eq(got, want)
+}
+
+///|
+/// 机器读者不该比人拿到的更少：text 输出里那句"另含 XMP 包"在这个键上。
+/// 空清单 + `xmp:false` 说的是"没有元数据"，+ `xmp:true` 说的是
+/// "敏感东西在逐条清单装不下的那个包里"。
+test "read --json 的 xmp 键：没有元数据 ≠ 没有元数据" {
+  @test.assert_eq(
+    read_json("x.jpg", @lib.Jpeg, None, true),
+    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":true,\"exif\":false}",
+  )
+}
+
+///|
+test "大端块要说 MM，别一律报 II" {
+  let be = read_json("x.tif", @lib.Tiff, Some(block(false, [])), false)
+  let le = read_json("x.tif", @lib.Tiff, Some(block(true, [])), false)
+  assert_true(contains_byte_order(be, "MM"))
+  assert_true(contains_byte_order(le, "II"))
+}
+
+///|
+fn contains_byte_order(json : String, order : String) -> Bool {
+  json.contains("\"byte_order\":\"" + order + "\"")
+}
+
+///|
+test "没有 EXIF 的文件：exif 是 false，且根本不给 directories 键" {
+  @test.assert_eq(
+    read_json("plain.png", @lib.Png, None, false),
+    "{\"file\":\"plain.png\",\"container\":\"png\",\"xmp\":false,\"exif\":false}",
+  )
+}
+
+///|
+test "audit --json：一条没命中也要给空数组，不能把键省掉" {
+  @test.assert_eq(
+    audit_json(
+      "x.jpg",
+      "privacy",
+      Some(block(true, [])),
+      @lib.empty_policy(),
+      false,
+    ),
+    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":false,\"exif\":true,\"findings\":[]}",
+  )
+  // 空清单 + xmp:false 与 空清单 + xmp:true 是两个结论，必须都能表达：
+  // 后者说的是"敏感东西在策略管不到的包里"。
+  @test.assert_eq(
+    audit_json(
+      "x.jpg",
+      "privacy",
+      Some(block(true, [])),
+      @lib.empty_policy(),
+      true,
+    ),
+    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":true,\"exif\":true,\"findings\":[]}",
+  )
+}
+
+///|
+/// 坐标走字符串就是为了让这行永远合法：0 分母的有理数会折算成非有限
+/// `Double`，而 JSON 里没有 `inf` 这个字面量。
+test "GPS 坐标以字符串给出，缺坐标是 null" {
+  @test.assert_eq(gps_json(block(true, [])), "null")
+  let lat = @lib.Rationals([
+    { num: 31L, den: 1L, },
+    { num: 0L, den: 1L, },
+    { num: 13L, den: 10000L, },
+  ])
+  let lon = @lib.Rationals([
+    { num: 121L, den: 1L, },
+    { num: 0L, den: 1L, },
+    { num: 14L, den: 10000L, },
+  ])
+  let entries : Array[@lib.IfdEntry] = [
+    { tag: 1, type_code: 2, value: @lib.Text("N"), },
+    { tag: 2, type_code: 5, value: lat, },
+    { tag: 3, type_code: 2, value: @lib.Text("E"), },
+    { tag: 4, type_code: 5, value: lon, },
+  ]
+  let s = gps_json(block(true, entries))
+  assert_true(s.has_prefix("\"31.0"))
+  assert_true(s.contains(",121.0"))
+}
+
+///|
+test "JSON 里的字符串一律转成 ASCII：引号、反斜杠、控制符、非 ASCII、代理对" {
+  @test.assert_eq(json_str("nik\"on"), "\"nik\\\"on\"")
+  @test.assert_eq(json_str("C:\\pics\\a.jpg"), "\"C:\\\\pics\\\\a.jpg\"")
+  @test.assert_eq(json_str("a\nb"), "\"a\\nb\"")
+  @test.assert_eq(json_str("a\tb"), "\"a\\tb\"")
+  @test.assert_eq(json_str("\u{1}"), "\"\\u0001\"")
+  @test.assert_eq(json_str("上海"), "\"\\u4e0a\\u6d77\"")
+  @test.assert_eq(json_str("😀"), "\"\\ud83d\\ude00\"")
+}
+
+///|
+test "中文文件名不会把非法字节漏进 JSON 输出" {
+  let s = read_json("C:\\图\\a.jpg", @lib.Jpeg, None, false)
+  let non_ascii = s.to_array().filter(c => c.to_int() >= 128)
+  @test.assert_eq(non_ascii.length(), 0)
+  assert_true(s.contains("\\u56fe"))
+}
+
+///|
+test "--json 只挂在 read 与 audit 上，写操作不认这个旗标" {
+  @test.assert_eq(
+    act(["read", "a.jpg", "--json"]),
+    "read a.jpg privacy -o=- json",
+  )
+  @test.assert_eq(
+    act(["audit", "a.jpg", "--json"]),
+    "audit a.jpg privacy -o=- json",
+  )
+  @test.assert_eq(act(["redact", "a.jpg", "--json"]), "解析失败")
+  @test.assert_eq(act(["strip", "a.jpg", "--json"]), "解析失败")
 }

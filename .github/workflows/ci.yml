@@ -98,6 +98,24 @@ jobs:
           moon run cmd/main -- redact /tmp/fix/cross.png --policy strict
           moon run cmd/main -- strip /tmp/fix/cross.jpg
           moon run cmd/main -- strip /tmp/fix/cross.png
+          # 两种带 XMP 的形状：EXIF+XMP，以及只有 XMP 没有 EXIF。
+          # 后者的逐条清单天然是空的，只看清单的工具会在这里报"无事可做"。
+          moon run cmd/main -- read /tmp/fix/cross_xmp.jpg
+          moon run cmd/main -- audit /tmp/fix/cross_xmp.jpg --policy strict
+          moon run cmd/main -- redact /tmp/fix/cross_xmp.jpg --policy strict
+          moon run cmd/main -- strip /tmp/fix/cross_xmp.jpg
+          moon run cmd/main -- redact /tmp/fix/xmp_only.jpg --policy strict
+          moon run cmd/main -- strip /tmp/fix/xmp_only.jpg
 
       - name: 用 Pillow 验收脱敏结果
         run: python ci/assert_redacted.py /tmp/fix
+
+      # 真实语料不在仓库里，完整对拍 CI 跑不了；但这两关仍要跑：
+      # 上一关把对拍脚本对准那五份 fixture，让它的三道闸（XMP 残留、
+      # `xmp` 键与字节的双向复核、量尺归因）真的被执行——脚本自己坏了也要能红；
+      # 再下一关用合成输入钉住那三条归因判据：它们一旦被改宽，红会悄悄变成绿。
+      - name: 对拍脚本对准 fixture 跑一遍
+        run: python ci/crosscheck_real.py /tmp/fix -o /tmp/cross
+
+      - name: 归因判据不许被悄悄改宽
+        run: python ci/crosscheck_selftest.py

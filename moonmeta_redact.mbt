@@ -16,6 +16,13 @@ pub(all) struct Policy {
   maker_note : Bool
   comments : Bool
   timestamps : Bool
+  /// 整包载体：JPEG 的 APP1/XMP 段、PNG 的 XMP 文本块，以及 IFD0 里的
+  /// XMP / Photoshop / IPTC-NAA 条目。
+  ///
+  /// 单独一个开关，是因为它管的不是"某一条敏不敏感"，而是"这张图还有第二份元数据"。
+  /// EXIF 里的 DateTimeOriginal 删掉、XMP 里那份原样留着，等于没删——
+  /// 而报告上看不出任何异常。99 张真实照片里有 34 张带 XMP 包。
+  carrier : Bool
 } derive(Debug, Eq)
 
 ///|
@@ -25,7 +32,9 @@ pub extend Policy with Eq::{not_equal, equal}
 pub extend Policy with @debug.Debug::{to_repr}
 
 ///|
-/// 常规发布用：坐标、署名、序列号、厂商私有块、备注。
+/// 常规发布用：坐标、署名、序列号、厂商私有块、备注，以及整包 XMP。
+///
+/// XMP 默认也删：它是同一批事实的第二份副本，留着就等于没删。
 pub fn privacy_policy() -> Policy {
   {
     location: true,
@@ -34,6 +43,7 @@ pub fn privacy_policy() -> Policy {
     maker_note: true,
     comments: true,
     timestamps: false,
+    carrier: true,
   }
 }
 
@@ -47,6 +57,7 @@ pub fn strict_policy() -> Policy {
     maker_note: true,
     comments: true,
     timestamps: true,
+    carrier: true,
   }
 }
 
@@ -60,6 +71,7 @@ pub fn empty_policy() -> Policy {
     maker_note: false,
     comments: false,
     timestamps: false,
+    carrier: false,
   }
 }
 
@@ -76,6 +88,7 @@ pub fn Policy::covers(self : Policy, category : Sensitive) -> Bool {
     MakerNote => self.maker_note
     Comments => self.comments
     Timestamps => self.timestamps
+    Carrier => self.carrier
   }
 }
 
@@ -103,6 +116,12 @@ pub extend Removed with @debug.Debug::{to_repr}
 pub(all) struct Redaction {
   removed : Array[Removed]
   dropped_thumbnail : Bool
+  /// 容器里的 XMP 包有没有被整段摘掉。
+  ///
+  /// 和 `dropped_thumbnail` 一样，这一项没法用 `removed` 里的一条记录表达：
+  /// XMP 不归 IFD 管，条目清单里根本没有它。
+  /// 那个 Bool 同样要区分"丢了"和"本来就没有"。
+  dropped_xmp : Bool
 } derive(Debug, Eq)
 
 ///|
@@ -118,6 +137,7 @@ pub fn TiffBlock::findings(self : TiffBlock, p : Policy) -> Array[Removed] {
   collect(self.ifd0, Ifd0, p, out)
   collect(self.exif, Exif, p, out)
   collect(self.gps, Gps, p, out)
+  collect(self.interop, Interop, p, out)
   out
 }
 
@@ -156,9 +176,15 @@ pub fn TiffBlock::redact(
     ifd0: keep_entries(self.ifd0, Ifd0, p),
     exif: keep_entries(self.exif, Exif, p),
     gps: keep_entries(self.gps, Gps, p),
+    interop: keep_entries(self.interop, Interop, p),
     has_ifd1: false,
   }
-  (block, { removed: report, dropped_thumbnail: self.has_ifd1, })
+  // 裸 TIFF 里 XMP 是 IFD0 的一条（0x02bc），已经被上面的按条过滤处理了；
+  // 这里的 dropped_xmp 只说容器里那种成包的 XMP。
+  (
+    block,
+    { removed: report, dropped_thumbnail: self.has_ifd1, dropped_xmp: false, },
+  )
 }
 
 ///|

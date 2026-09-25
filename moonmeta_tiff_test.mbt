@@ -157,6 +157,70 @@ test "编码是不动点：再读再写得到完全相同的字节" {
 }
 
 ///|
+/// 74 字节、逐字节手算的 Interop 示例：IFD0 只挂 Exif 指针，Exif 只挂
+/// 0xA005，第四张表里两条内联值。
+///
+/// 这份 fixture 存在的理由是真实语料里的一次返工：0xA005 曾经被当结构消费掉、
+/// 回写时整张表消失，44 个相机文件因此少了它们原本有的东西。外来布局
+/// 必须在这里被钉住，不能只靠"我们的编码器自己读自己写"。
+fn interop_fixture() -> Bytes {
+  let v : Array[Byte] = [
+    // 0: "II" + 42 + IFD0 @ 8
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+    // 8: IFD0 有 1 条
+     0x01, 0x00,
+    // 10: 0x8769 Exif 指针 -> 26
+     0x69, 0x87, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+    // 22: 无后继
+     0x00, 0x00, 0x00, 0x00,
+    // 26: Exif 有 1 条
+     0x01, 0x00,
+    // 28: 0xa005 Interop 指针 -> 44
+     0x05, 0xa0, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00,
+    // 40: 无后继
+     0x00, 0x00, 0x00, 0x00,
+    // 44: Interop 有 2 条
+     0x02, 0x00,
+    // 46: 0x0001 InteropIndex, ASCII x4, 内联 "R98"
+     0x01, 0x00, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x52, 0x39, 0x38, 0x00,
+    // 58: 0x1001 RelatedImageWidth, LONG x1, 内联 640
+     0x01, 0x10, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0x02, 0x00, 0x00,
+    // 70: 无后继
+     0x00, 0x00, 0x00, 0x00,
+  ]
+  Bytes::from_array(v)
+}
+
+///|
+test "第四张表读得出来：条目进 interop，指针本身哪儿也不进" {
+  let t = decode_ok(interop_fixture())
+  @test.assert_eq(t.ifd0.length(), 0)
+  @test.assert_eq(t.exif.length(), 0)
+  @test.assert_eq(t.gps.length(), 0)
+  @test.assert_eq(t.interop.length(), 2)
+  @test.assert_eq(t.interop[0].value, @moonmeta.Text("R98"))
+  @test.assert_eq(t.interop[1].value, @moonmeta.Longs([640L]))
+  @test.assert_eq(t.has_ifd1, false)
+}
+
+///|
+test "回写不丢第四张表，且查名字各按各的目录" {
+  let t = decode_ok(interop_fixture())
+  let bytes = @moonmeta.encode_tiff(t) catch {
+    e => fail("encode failed: \{e}")
+  }
+  let back = decode_ok(bytes)
+  @test.assert_eq(back, t)
+  @test.assert_eq(@moonmeta.tag_name(@moonmeta.Interop, 0x0001), "InteropIndex")
+  @test.assert_eq(
+    @moonmeta.tag_name(@moonmeta.Interop, 0x1001),
+    "RelatedImageWidth",
+  )
+  // 同一个编号在 GPS 目录里是 GPSLatitudeRef：名字必须随目录变
+  @test.assert_eq(@moonmeta.tag_name(@moonmeta.Gps, 0x0001), "GPSLatitudeRef")
+}
+
+///|
 test "既不是 II 也不是 MM：报出偏移" {
   let v : Array[Byte] = [0x00, 0x00, 0x00, 0x2a, 0x08, 0x00, 0x00, 0x00]
   try @moonmeta.decode_tiff(Bytes::from_array(v)) catch {
@@ -179,11 +243,11 @@ test "魔数不是 42：报 BadTiffHeader" {
 }
 
 ///|
-test "短于 8 字节：报出需要多少、实有多少" {
+test "短于 8 字节：报出坏在哪、需要多少、实有多少" {
   let v : Array[Byte] = [0x4d, 0x4d, 0x00, 0x2a]
   try @moonmeta.decode_tiff(Bytes::from_array(v)) catch {
-    @moonmeta.TooShort(8, 4) => ()
-    e => fail("expected TooShort(8,4), got \{e}")
+    @moonmeta.TooShort(0, 8, 4) => ()
+    e => fail("expected TooShort(0,8,4), got \{e}")
   } noraise {
     _ => fail("expected a rejection")
   }
@@ -201,15 +265,15 @@ test "IFD0 偏移指向块外：报 IfdOffsetOutOfRange" {
 }
 
 ///|
-test "条目数量撒谎：报 EntryTooLarge 而不是越界读" {
+test "条目数量撒谎：在表体起始偏移上拒绝，而不是越界读" {
   // IFD0@8 声明 0xffff 条（要 786420 字节），计数域之后只剩 6 字节
   let v : Array[Byte] = [
     0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08, 0xff, 0xff, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00,
   ]
   try @moonmeta.decode_tiff(Bytes::from_array(v)) catch {
-    @moonmeta.EntryTooLarge(0, 786420, 6) => ()
-    e => fail("expected EntryTooLarge(0,786420,6), got \{e}")
+    @moonmeta.EntryTooLarge(10, 0, 786420, 6) => ()
+    e => fail("expected EntryTooLarge(10,0,786420,6), got \{e}")
   } noraise {
     _ => fail("expected a rejection")
   }

@@ -239,19 +239,60 @@ pub fn png_remove_exif(data : Bytes) -> (Bytes, Bool) raise MetaError {
 }
 
 ///|
+/// 摘掉带 `XML:com.adobe.xmp` 关键字的文本块，并报告"原本确实有一块"。
+///
+/// 搬的是"这些块之外的字节"，不是重建文件：IDAT 一个字节都不重编码，
+/// IEND 之后可能有的尾部垃圾也照原样留着。
+pub fn png_drop_xmp(data : Bytes) -> (Bytes, Bool) raise MetaError {
+  let map = png_inspect(data)
+  let body = data.to_array()
+  let out : Array[Byte] = []
+  let mut cursor = 0
+  let mut dropped = false
+  for c in map.chunks {
+    let end = c.offset + 12 + c.length
+    if has_xmp_keyword(data, c.offset + 4, c.length) {
+      dropped = true
+      push_all(out, body, cursor, c.offset)
+      cursor = end
+    }
+  }
+  if !dropped {
+    (data, false)
+  } else {
+    push_all(out, body, cursor, body.length())
+    (Bytes::from_array(out), true)
+  }
+}
+
+///|
 /// 解析 → 按策略删 → 回写。
 pub fn png_redact(
   data : Bytes,
   p : Policy,
 ) -> (Bytes, Redaction) raise MetaError {
   let map = png_inspect(data)
-  match map.exif {
-    None => (data, { removed: [], dropped_thumbnail: false, })
+  let (out, report) = match map.exif {
+    None =>
+      (data, { removed: [], dropped_thumbnail: false, dropped_xmp: false, })
     Some((s, e)) => {
       let block = decode_tiff(slice_bytes(data, s, e))
       let (kept, report) = block.redact(p)
-      (png_replace_exif(data, encode_tiff(kept)), report)
+      // 与 JPEG 侧同一条规矩：一条没删就不重写这个块。
+      // 空策略必须是恒等，不能顺手把文件规范化一遍。
+      if report.removed.is_empty() && !report.dropped_thumbnail {
+        (data, report)
+      } else {
+        (png_replace_exif(data, encode_tiff(kept)), report)
+      }
     }
+  }
+  // 没有 eXIf 也照走这一趟：XMP 完全可以独立存在，那种文件正是"第二份副本"。
+  if !p.covers(Carrier) {
+    (out, report)
+  } else {
+    let (out2, dropped) = png_drop_xmp(out)
+    (out2, { ..report, dropped_xmp: dropped, })
   }
 }
 
@@ -278,7 +319,7 @@ pub fn PngMap::describe(self : PngMap) -> String {
     head = head + " \{c.kind}@\{c.offset}(\{c.length}B)"
   }
   if self.has_xmp {
-    head + " ; 另含 XMP，本版本不解析也不删除"
+    head + " ; 另含 XMP 文本块"
   } else {
     head
   }

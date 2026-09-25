@@ -20,11 +20,14 @@ fn cites(msg : String, needles : Array[String]) -> Unit raise {
 ///|
 test "每条错误都报出自己的编号、偏移与数额" {
   let cases : Array[(MetaError, Array[String])] = [
-    (TooShort(8, 4), ["8", "4"]),
+    (TooShort(3, 8, 4), ["at offset 3", "8", "4"]),
     (BadTiffHeader(12), ["12"]),
     (BadByteOrder(0), ["0"]),
     (IfdOffsetOutOfRange(65535L), ["65535"]),
-    (EntryTooLarge(0x0110, 786420, 6), ["0x0110", "786420", "6"]),
+    (
+      EntryTooLarge(74, 0x0110, 786420, 6),
+      ["0x0110", "offset 74", "786420", "6"],
+    ),
     (ValueOffsetOutOfRange(0x0110, 256L), ["0x0110", "256"]),
     (UnsupportedType(0x8826, 12), ["0x8826", "12"]),
     (SubIfdOutOfRange(0x8769, 4096L), ["0x8769", "4096"]),
@@ -38,13 +41,24 @@ test "每条错误都报出自己的编号、偏移与数额" {
     (ExtraMetadata(260), ["260"]),
     (NotPng(1), ["1"]),
     (BadChecksum(33, 3421780262L, 16L), ["33", "0xcbf43926"]),
+    (TiffNotByteExact(6400L, 6925, 533), ["6400", "6925", "533"]),
     (UnknownFormat(0), ["JPEG", "PNG", "TIFF"]),
   ]
   for c in cases {
     let (e, needles) = c
     cites(e.to_string(), needles)
   }
-  @test.assert_eq(cases.length(), 19)
+  @test.assert_eq(cases.length(), 20)
+}
+
+///|
+/// `ci/crosscheck_real.py` 认这条拒绝靠的是这句话（CLI 打的是 `Show` 文案，
+/// 不是变体名）。那句话在这里钉住：改文案会先红在这里，而不是让对拍脚本
+/// 悄悄把 8 个文件重新算成失败。
+test "裸 TIFF 的拒绝写法是语料脚本的接头暗号" {
+  cites(TiffNotByteExact(6400L, 6925, 533).to_string(), [
+    "refusing to rewrite this bare TIFF",
+  ])
 }
 
 ///|

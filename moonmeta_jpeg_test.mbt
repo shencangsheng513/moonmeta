@@ -277,6 +277,30 @@ test "XMP 冒充的 APP1 不会被当成 EXIF，也不会被 strip 误伤" {
 }
 
 ///|
+test "摘 XMP 只摘那一段：EXIF 还读得出来，尾巴一个字节没动" {
+  let with_xmp = append_xmp_app1(jpeg_with(Some(fixture())))
+  let before = inspect_ok(with_xmp).segments.length()
+  let (out, dropped) = @moonmeta.jpeg_drop_xmp(with_xmp) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(dropped, true)
+  @test.assert_eq(inspect_ok(out).has_xmp, false)
+  @test.assert_eq(inspect_ok(out).segments.length(), before - 1)
+  // EXIF 与隔壁的注释段是"其余字节"，必须原样留下
+  @test.assert_eq(decoded(out).gps.length(), 4)
+  @test.assert_eq(contains_bytes(out, ascii("moonbit test")), true)
+  @test.assert_eq(
+    Bytes::from_array(span(out, out.length() - 8, out.length())),
+    Bytes::from_array(span(with_xmp, with_xmp.length() - 8, with_xmp.length())),
+  )
+  let (again, second) = @moonmeta.jpeg_drop_xmp(out) catch {
+    e => fail("second drop failed: \{e}")
+  }
+  @test.assert_eq(second, false)
+  @test.assert_eq(again, out)
+}
+
+///|
 test "没有 EXIF 的文件也能写进去：新段插在 APP0 之后" {
   let out = @moonmeta.jpeg_replace_exif(jpeg_with(None), fixture()) catch {
     e => fail("replace failed: \{e}")

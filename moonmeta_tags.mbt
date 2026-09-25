@@ -11,6 +11,7 @@ pub(all) enum Dir {
   Ifd0
   Exif
   Gps
+  Interop
 } derive(Debug, Eq)
 
 ///|
@@ -25,6 +26,7 @@ pub fn Dir::label(self : Dir) -> String {
     Ifd0 => "IFD0"
     Exif => "Exif"
     Gps => "GPS"
+    Interop => "Interop"
   }
 }
 
@@ -43,6 +45,7 @@ pub fn tag_name(dir : Dir, tag : Int) -> String {
     Ifd0 => ifd0_name(tag)
     Exif => exif_name(tag)
     Gps => gps_name(tag)
+    Interop => interop_name(tag)
   }
   match named {
     Some(s) => s
@@ -61,8 +64,11 @@ fn ifd0_name(tag : Int) -> String? {
     0x013b => Some("Artist")
     0x0201 => Some("JPEGInterchangeFormat")
     0x0202 => Some("JPEGInterchangeFormatLength")
+    0x02bc => Some("XMP")
+    0x02bd => Some("PhotoshopSettings")
     0x8298 => Some("Copyright")
     0x8769 => Some("ExifOffset")
+    0x8773 => Some("IptcNaa")
     0x8825 => Some("GPSInfo")
     _ => None
   }
@@ -85,6 +91,23 @@ fn exif_name(tag : Int) -> String? {
     0xa420 => Some("ImageUniqueID")
     0xa431 => Some("BodySerialNumber")
     0xa435 => Some("LensSerialNumber")
+    _ => None
+  }
+}
+
+///|
+/// Interoperability IFD 的名字表。
+///
+/// 只收真实语料里出现过的四个编号（对拍语料里带 Interop IFD 的 44 个文件，
+/// 键集合恰好是 `0x1/0x2` 或 `0x1/0x2/0x1001/0x1002` 两种）。规范里还有别的编号，
+/// 但没在这儿被任何相机写出过——把没验证过的名字写进表里，
+/// 就等于把猜测冒充成这库的认识。
+fn interop_name(tag : Int) -> String? {
+  match tag {
+    0x0001 => Some("InteropIndex")
+    0x0002 => Some("InteropVersion")
+    0x1001 => Some("RelatedImageWidth")
+    0x1002 => Some("RelatedImageHeight")
     _ => None
   }
 }
@@ -145,6 +168,11 @@ let sensitive_tags : Array[(Dir, Int, Sensitive)] = [
   (Exif, 0xa435, DeviceId),
   // 厂商私有块：内容不受规范约束，坐标常藏在里面
   (Exif, 0x927c, MakerNote),
+  // 整包载体：条目本身只有一句"这里另有一整套元数据"，
+  // 里面的字段归 XMP / Photoshop / IPTC 各自的规范管，我们逐条判断不了。
+  (Ifd0, 0x02bc, Carrier),
+  (Ifd0, 0x02bd, Carrier),
+  (Ifd0, 0x8773, Carrier),
   // 用户写的话
   (Exif, 0x9286, Comments),
   // 能把照片排进时间线的一切
@@ -176,6 +204,13 @@ pub(all) enum Sensitive {
   Comments
   /// 能把照片排进时间线的一切
   Timestamps
+  /// 整包的外部元数据载体：XMP / Photoshop IRB / IPTC-NAA。
+  ///
+  /// 前六类说的是"这一条是什么"，这一类说的是"这里还有一整套元数据"：
+  /// 载体里的字段编号、命名、编码都归另一份规范管，按条判断力所不及，
+  /// 只能整包丢。99 张真实照片里，IFD0 带 XMP 载体的 1 张、带 IPTC-NAA 的 4 张，
+  /// 而 JPEG/PNG 里的 XMP 包有 34 张——所以这一类不是理论负担。
+  Carrier
 } derive(Debug, Eq)
 
 ///|
@@ -194,6 +229,7 @@ pub fn Sensitive::label(self : Sensitive) -> String {
     MakerNote => "maker_note"
     Comments => "comments"
     Timestamps => "timestamps"
+    Carrier => "carrier"
   }
 }
 

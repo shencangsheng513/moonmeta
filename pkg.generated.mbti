@@ -20,6 +20,8 @@ pub fn encode_tiff(TiffBlock) -> Bytes raise MetaError
 
 pub fn jpeg_decode(Bytes) -> TiffBlock? raise MetaError
 
+pub fn jpeg_drop_xmp(Bytes) -> (Bytes, Bool) raise MetaError
+
 pub fn jpeg_exif(Bytes) -> Bytes? raise MetaError
 
 pub fn jpeg_inspect(Bytes) -> JpegMap raise MetaError
@@ -33,6 +35,8 @@ pub fn jpeg_replace_exif(Bytes, Bytes) -> Bytes raise MetaError
 pub fn marker_name(Int) -> String
 
 pub fn png_decode(Bytes) -> TiffBlock? raise MetaError
+
+pub fn png_drop_xmp(Bytes) -> (Bytes, Bool) raise MetaError
 
 pub fn png_exif(Bytes) -> Bytes? raise MetaError
 
@@ -56,7 +60,7 @@ pub fn sniff(Bytes) -> Kind?
 
 pub fn strict_policy() -> Policy
 
-pub fn strip_any(Bytes) -> (Bytes, Bool) raise MetaError
+pub fn strip_any(Bytes) -> (Bytes, Strip) raise MetaError
 
 pub let tag_exif_ifd : Int
 
@@ -76,11 +80,11 @@ pub fn type_size(Int) -> Int?
 
 // Errors
 pub suberror MetaError {
-  TooShort(Int, Int)
+  TooShort(Int, Int, Int)
   BadTiffHeader(Int)
   BadByteOrder(Int)
   IfdOffsetOutOfRange(Int64)
-  EntryTooLarge(Int, Int, Int)
+  EntryTooLarge(Int, Int, Int, Int)
   ValueOffsetOutOfRange(Int, Int64)
   UnsupportedType(Int, Int)
   SubIfdOutOfRange(Int, Int64)
@@ -94,6 +98,7 @@ pub suberror MetaError {
   ExtraMetadata(Int)
   NotPng(Int)
   BadChecksum(Int, Int64, Int64)
+  TiffNotByteExact(Int64, Int, Int)
   UnknownFormat(Int)
 } derive(@debug.Debug)
 pub fn MetaError::output(Self, &Logger) -> Unit
@@ -106,6 +111,7 @@ pub(all) enum Dir {
   Ifd0
   Exif
   Gps
+  Interop
 } derive(Eq, @debug.Debug)
 pub fn Dir::equal(Self, Self) -> Bool
 pub fn Dir::label(Self) -> String
@@ -128,6 +134,7 @@ pub(all) struct JpegMap {
   segments : Array[JpegSegment]
   exif : (Int, Int)?
   has_xmp : Bool
+  xmp : Array[(Int, Int)]
 } derive(Eq, @debug.Debug)
 pub fn JpegMap::describe(Self) -> String
 pub fn JpegMap::equal(Self, Self) -> Bool
@@ -182,6 +189,7 @@ pub(all) struct Policy {
   maker_note : Bool
   comments : Bool
   timestamps : Bool
+  carrier : Bool
 } derive(Eq, @debug.Debug)
 pub fn Policy::covers(Self, Sensitive) -> Bool
 pub fn Policy::equal(Self, Self) -> Bool
@@ -203,6 +211,7 @@ pub impl Show for Rational
 pub(all) struct Redaction {
   removed : Array[Removed]
   dropped_thumbnail : Bool
+  dropped_xmp : Bool
 } derive(Eq, @debug.Debug)
 pub fn Redaction::equal(Self, Self) -> Bool
 pub fn Redaction::not_equal(Self, Self) -> Bool
@@ -225,6 +234,7 @@ pub(all) enum Sensitive {
   MakerNote
   Comments
   Timestamps
+  Carrier
 } derive(Eq, @debug.Debug)
 pub fn Sensitive::equal(Self, Self) -> Bool
 pub fn Sensitive::label(Self) -> String
@@ -233,6 +243,14 @@ pub fn Sensitive::output(Self, &Logger) -> Unit
 pub fn Sensitive::to_repr(Self) -> @debug.Repr
 pub fn Sensitive::to_string(Self) -> String
 pub impl Show for Sensitive
+
+pub(all) struct Strip {
+  had_exif : Bool
+  dropped_xmp : Bool
+} derive(Eq, @debug.Debug)
+pub fn Strip::equal(Self, Self) -> Bool
+pub fn Strip::not_equal(Self, Self) -> Bool
+pub fn Strip::to_repr(Self) -> @debug.Repr
 
 pub(all) enum TagValue {
   Text(String)
@@ -256,6 +274,7 @@ pub(all) struct TiffBlock {
   ifd0 : Array[IfdEntry]
   exif : Array[IfdEntry]
   gps : Array[IfdEntry]
+  interop : Array[IfdEntry]
   has_ifd1 : Bool
 } derive(Eq, @debug.Debug)
 pub fn TiffBlock::artist(Self) -> String?
