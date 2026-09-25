@@ -166,6 +166,32 @@ test "XMP 那句话说的是三件事，不是一件事" {
 }
 
 ///|
+/// 这句话是 `ci/crosscheck_real.py` 的 strip 那一关要解析的对象：
+/// 四个状态各有一句，改措辞必须先红在这里，而不是红在一次跑批里。
+test "strip 那句话按载体点名，否定那句也不能多说" {
+  @test.assert_eq(
+    strip_said({ had_exif: true, dropped_xmp: true, }),
+    "元数据已整段摘除：EXIF,XMP 包。",
+  )
+  @test.assert_eq(
+    strip_said({ had_exif: true, dropped_xmp: false, }),
+    "元数据已整段摘除：EXIF。",
+  )
+  @test.assert_eq(
+    strip_said({ had_exif: false, dropped_xmp: true, }),
+    "元数据已整段摘除：XMP 包。",
+  )
+  let absent = strip_said({ had_exif: false, dropped_xmp: false, })
+  @test.assert_eq(
+    absent, "这个文件本来就没有 EXIF，也没有 XMP 包。",
+  )
+  // 否定那句里同样写着 EXIF 与 XMP 两个字面：
+  // 对拍脚本因此按"点名了哪些载体"判，不做子串查找。
+  @test.assert_eq(absent.contains("EXIF"), true)
+  @test.assert_eq(absent.contains("XMP 包"), true)
+}
+
+///|
 /// 这句话问的是策略，不是"删了没有"：内置的 privacy / strict 都覆盖载体，
 /// 但在库里自己拼 `Policy` 的人能让它不覆盖。那时候若还说"会整包摘除"，
 /// 就是替用户许下一个策略并没有许的承诺。

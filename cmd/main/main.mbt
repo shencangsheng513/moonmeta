@@ -629,16 +629,21 @@ fn strip_file(req : Request, data : Bytes) -> Int {
       return 1
     }
   }
+  println(strip_said(had))
+  write_result(req, bytes)
+}
+
+///|
+/// 摘除之后怎么说。对拍脚本要拿这句话跟文件本身的事实比对，
+/// 所以四个状态各有一句、且都不许多说。
+fn strip_said(had : @lib.Strip) -> String {
   // "本来就没有"和"已清除"是两回事；说错这一句，整个工具就没人敢信了。
   // 两件事分开说：EXIF 摘干净而 XMP 留着，不叫摘干净。
-  println(
-    if had.had_exif || had.dropped_xmp {
-      "元数据已整段摘除：" + join_comma(strip_parts(had)) + "。"
-    } else {
-      "这个文件本来就没有 EXIF，也没有 XMP 包。"
-    },
-  )
-  write_result(req, bytes)
+  if had.had_exif || had.dropped_xmp {
+    "元数据已整段摘除：" + join_comma(strip_parts(had)) + "。"
+  } else {
+    "这个文件本来就没有 EXIF，也没有 XMP 包。"
+  }
 }
 
 ///|

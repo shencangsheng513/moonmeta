@@ -17,6 +17,11 @@
    privacy 的期望不另抄一份敏感表，从同一个文件的 strict findings 按
    category 推（两档只差 `timestamps`）；外加一条逐字节比对，
    钉住"缺省产物 == 显式 --policy privacy 的产物"。
+5. **`strip` 也过一遍真实语料**——四步写侧里它一直是零证据（这个脚本从前从不跑它）。
+   判据不靠猜它该说什么：产物要被我们自己的 `read` 判成干净、被 Pillow 读不出任何
+   条目、字节里搜不到包标记与敏感键，而 CLI 那句话必须与这个文件的事实对齐。
+   另有一条更硬的性质：**凡是 `redact` 写得出的文件，`strip` 也必须写得出来**，
+   所以 strip 的非零退出码一律算分诊，不去匹配任何错误措辞。
 
 "点名哪些条目"这件事刻意不在这个脚本里再抄一份策略：它取自 `audit --json`
 的输出。策略只有一个来源（库），这个脚本只负责"另一个人怎么看"。
@@ -342,6 +347,103 @@ def privacy_expectations(findings, their, after, explained):
     return residue, ts_lost
 
 
+# strip 报"摘了"的那句话的前缀。整句话由命令行自己的测试钉着，
+# 改措辞会先红在 `moon test` 里，而不是红在这次的跑批里。
+STRIP_AFFIRM = "元数据已整段摘除："
+
+
+def strip_claims(output, had_exif, had_xmp):
+    """CLI 那句话与这个文件的事实之间的差集（空 = 说得对）。
+
+    先把"元数据已整段摘除：EXIF,XMP 包。"里点名的载体拆成一个集合再比。
+    不能只做 `"EXIF" in output` 这种子串判断——否定那句"这个文件本来就没有
+    EXIF，也没有 XMP 包"里同样写着 EXIF 和 XMP，子串会把一条谎说成实话。
+
+    事实只取两处：`had_exif` 是这个文件自己 `read --json` 的 `exif` 位，
+    `had_xmp` 是它的原始字节里有没有包标记。刻意不拿 Pillow 的读数当
+    "有没有 EXIF"的依据——Pillow 会把 XMP 包里的值注进 `getexif()`，
+    一个只有 XMP 的 PNG 会被判成"有 EXIF"，闸就会在一个合法的说法上报红。
+    """
+    out = []
+    said_absent = "本来就没有" in output
+    _, _, tail = output.partition(STRIP_AFFIRM)
+    listed = {p for p in tail.split("。")[0].split(",") if p} if tail else set()
+    if had_exif and "EXIF" not in listed:
+        out.append("源文件有 EXIF 段，strip 却没有交代摘除它")
+    if had_xmp and "XMP 包" not in listed:
+        out.append("源文件带着 XMP 包，strip 却没有交代摘除它")
+    if (had_exif or had_xmp) and said_absent:
+        out.append("源文件有元数据，strip 却说这个文件本来就没有")
+    if not (had_exif or had_xmp) and not said_absent:
+        out.append("源文件 EXIF 与 XMP 两样都没有，strip 却说摘除了东西")
+    return out
+
+
+def strip_step(moon, repo, src, out_dir, stats, doc, src_blob, pixels_before):
+    """在这个文件上跑一趟 `strip`，返回分诊说明（空 = 这一关过了）。
+
+    六路观察，互相独立：产物我们自己读得回不读得回、Pillow 还读不读得到条目、
+    产物字节里还剩不剩包标记与敏感键、CLI 那句话对不对得上事实、输入动没动、
+    像素动没动。任何一路红都不需要另一路背书。
+    """
+    s_dst = out_dir / (src.stem + ".stripped" + src.suffix)
+    had_xmp = any(m in src_blob for m in XMP_MARKS)
+    before_input = sha256(src)
+    code, out = run_moon(moon, ["strip", str(src), "-o", str(s_dst)], repo)
+    if code != 0:
+        # 调用方只在 redact 已经写出产物的分支里跑这里：同一个文件，
+        # redact 改得动而 strip 改不动，只可能是 strip 自己的问题。
+        # 所以这里不比对错误措辞——措辞会变，这条性质不会。
+        return [
+            "redact 写得出的文件，strip 退出码 {}: {}".format(
+                code, out.strip()[:160]
+            )
+        ]
+
+    stats["stripped"] = stats.get("stripped", 0) + 1
+    if had_xmp:
+        stats["strip_xmp"] = stats.get("strip_xmp", 0) + 1
+
+    notes = strip_claims(out, bool(doc["exif"]), had_xmp)
+
+    s_doc, s_err = read_json(moon, repo, s_dst)
+    if s_doc is None:
+        notes.append("strip 产物我们自己读不回来: " + (s_err or "")[:160])
+    else:
+        if s_doc["exif"]:
+            notes.append("strip 之后 read 还报得出 EXIF")
+        if s_doc.get("xmp") is True:
+            notes.append("strip 之后 read 还报得出 XMP 包")
+
+    try:
+        left = pillow_dirs(s_dst)
+    except OSError as e:
+        notes.append("strip 产物 Pillow 解不开: {}".format(e))
+        left = None
+    if left is not None:
+        seen = {name: sorted(left[name]) for name in DIRS if left[name]}
+        if seen:
+            notes.append("strip 之后 Pillow 还读得到条目: {}".format(seen))
+
+    blob = s_dst.read_bytes()
+    marks = [m.decode() for m in XMP_MARKS if m in blob]
+    if marks:
+        notes.append("strip 之后产物里还有 XMP 包: {}".format(marks))
+    keys = [k.decode() for k in XMP_SENSITIVE if k in blob]
+    if keys:
+        notes.append("strip 之后产物字节里还搜得到敏感键: {}".format(keys))
+
+    if sha256(src) != before_input:
+        notes.append("strip 改动了输入文件本身")
+    if pixels_before is not None:
+        try:
+            if pixel_hash(s_dst) != pixels_before:
+                notes.append("strip 动了像素")
+        except OSError as e:
+            notes.append("strip 产物解不开，像素没比成: {}".format(e))
+    return notes
+
+
 def check_one(moon, repo, src, out_dir, stats):
     """一个文件的五条结论。返回 (状态桶, 需要分诊的说明列表)。"""
     notes = []
@@ -614,6 +716,14 @@ def check_one(moon, repo, src, out_dir, stats):
                 except OSError as e:
                     bucket = "triage"
                     notes.append("privacy 产物解不开: {}".format(e))
+
+        # 6) 整段摘除。写侧四步里这一步先前一条真实语料证据都没有：
+        #    redact 在这个文件上改得动，strip 就必须改得动、而且要摘得更干净。
+        for note in strip_step(
+            moon, repo, src, out_dir, stats, doc, src_blob, pixels_before
+        ):
+            notes.append(note)
+            bucket = "triage"
     else:
         # 没有 EXIF 不等于没有元数据：整包 XMP 可以单独存在，
         # 而那种文件的逐条清单天然是空的。不单独跑这一趟，闸就永远绿。
@@ -686,6 +796,21 @@ def check_one(moon, repo, src, out_dir, stats):
                     if sha256(src) != before_input:
                         bucket = "triage"
                         notes.append("privacy 改动了输入文件本身")
+
+                # 这个形状上 strip 最该验：EXIF 段本来就是空的，
+                # 唯一要摘的东西就是那一整包。
+                for note in strip_step(
+                    moon,
+                    repo,
+                    src,
+                    out_dir,
+                    stats,
+                    doc,
+                    src_blob,
+                    pixels_before,
+                ):
+                    notes.append(note)
+                    bucket = "triage"
 
     return bucket, notes
 
@@ -778,6 +903,13 @@ def main():
         )
     )
     print(
+        "整段摘除（strip）：写侧产物 {} 个，其中源文件带着 XMP 包 {} 个"
+        "（分母就是 strict redact 写出产物的文件数：这类文件一个都不许漏跑）".format(
+            stats.get("stripped", 0),
+            stats.get("strip_xmp", 0),
+        )
+    )
+    print(
         "xmp 键复核：jpeg/png 共 {} 个，两个方向都跟各自字节比过".format(
             stats.get("xmp_flag", 0)
         )
@@ -797,6 +929,15 @@ def main():
             print("  {}".format(p.name))
             for n in notes:
                 print("      {}".format(n))
+    if not stats.get("stripped"):
+        # 全绿但一格都没跑，等于没有这一关：语料换了、过滤器改窄了，
+        # 都会让 strip 的证据悄悄归零，而退出码还是 0。
+        print()
+        print(
+            "strip 这一关一个文件都没跑到（语料里没有一个文件的 redact 写出过产物）。"
+            "这一轮的绿不包括整段摘除的证据。"
+        )
+        return 1
     return 1 if triage else 0
 
 

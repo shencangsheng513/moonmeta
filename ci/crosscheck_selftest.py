@@ -6,7 +6,9 @@
 每种"证据不齐"的情形都必须拒绝归因，让那格红回到 triage 里去。
 `gps_via_exif_pointer`（GPS 指针挂在 Exif 里）和 `privacy_expectations`
 （默认策略该删什么、该留什么）同理：后者一整批格子在语料上一次都不命中
-也仍然全绿，所以它的双向门槛只能在这里钉。
+也仍然全绿，所以它的双向门槛只能在这里钉。`strip_claims`（`strip` 那句话与
+文件事实的差集）也一样——语料里只会出现其中两种说法，写成"查个子串就放行"
+照样全绿，四态真值表得在这里摆全。
 
 跑法（不需要语料，也不需要 moon）：
 
@@ -27,6 +29,7 @@ from crosscheck_real import (  # noqa: E402
     nested_gps_entries,
     out_dir_inside_corpus,
     privacy_expectations,
+    strip_claims,
     xmp_flag_problems,
     xmp_injected,
     zero_length_entries,
@@ -332,6 +335,68 @@ class OutDirNesting(unittest.TestCase):
     def test_产物目录是语料的上一级也不算(self):
         # 语料在 fix/ 里、产物写到根：根下面确实还有别的图片，但那不是这一轮写的
         self.assertFalse(out_dir_inside_corpus(self.corpus, self.root))
+
+
+# CLI 的三句原话，逐字抄在这里当量尺：改了措辞要先红在这组用例里
+# （cmd/main 的 strip_said 那边也有一条同名断言）。
+SAID_BOTH = "元数据已整段摘除：EXIF,XMP 包。\n已写出 out.jpg"
+SAID_EXIF = "元数据已整段摘除：EXIF。\n已写出 out.jpg"
+SAID_XMP = "元数据已整段摘除：XMP 包。\n已写出 out.png"
+SAID_NONE = "这个文件本来就没有 EXIF，也没有 XMP 包。\n已写出 out.jpg"
+
+
+class StripClaims(unittest.TestCase):
+    """strip 那句话与文件事实之间的判据：四态真值表。
+
+    这一关在语料上只命中两种（两个载体都有、只有 XMP），其余靠这里钉：
+    判据一旦写松（比如退化成 `"EXIF" in output` 的子串查找），
+    全绿的跑批查不出来，这组用例能。
+    """
+
+    def test_两样都摘了两样都说了_不报(self):
+        self.assertEqual(strip_claims(SAID_BOTH, True, True), [])
+
+    def test_只有XMP的文件不提EXIF_不报(self):
+        # had_exif=false 时那句只点名 XMP 包，这是实话
+        self.assertEqual(strip_claims(SAID_XMP, False, True), [])
+
+    def test_两样都没有_承认没有就不报(self):
+        self.assertEqual(strip_claims(SAID_NONE, False, False), [])
+
+    def test_有EXIF却没点名(self):
+        res = strip_claims(SAID_XMP, True, False)
+        self.assertEqual(
+            [n for n in res if "EXIF 段" in n],
+            ["源文件有 EXIF 段，strip 却没有交代摘除它"],
+        )
+
+    def test_有XMP包却没点名(self):
+        res = strip_claims(SAID_EXIF, True, True)
+        self.assertEqual(
+            [n for n in res if "XMP 包" in n],
+            ["源文件带着 XMP 包，strip 却没有交代摘除它"],
+        )
+
+    def test_明明有却说本来就没有(self):
+        # 这一格就是子串判据的陷阱：SAID_NONE 里 EXIF 和 XMP 两个词都在，
+        # 查子串会以为"说了"，查点名的载体才看得出它什么都没说。
+        res = strip_claims(SAID_NONE, True, True)
+        self.assertEqual(
+            [n for n in res if "本来就没有" in n],
+            ["源文件有元数据，strip 却说这个文件本来就没有"],
+        )
+        self.assertEqual(len(res), 3)  # 两个载体各一条 + 谎说没有一条
+
+    def test_两样都没有却说摘了东西(self):
+        res = strip_claims(SAID_EXIF, False, False)
+        self.assertEqual(
+            res, ["源文件 EXIF 与 XMP 两样都没有，strip 却说摘除了东西"]
+        )
+
+    def test_两种说法都不是_也算没交代(self):
+        # 前缀换掉、否定句也没有：两个载体各算一条"没点名"
+        res = strip_claims("清完了。\n已写出 out.jpg", True, True)
+        self.assertEqual(len(res), 2)
 
 
 if __name__ == "__main__":
