@@ -52,13 +52,47 @@ test "每条错误都报出自己的编号、偏移与数额" {
 }
 
 ///|
-/// `ci/crosscheck_real.py` 认这条拒绝靠的是这句话（CLI 打的是 `Show` 文案，
-/// 不是变体名）。那句话在这里钉住：改文案会先红在这里，而不是让对拍脚本
-/// 悄悄把 8 个文件重新算成失败。
-test "裸 TIFF 的拒绝写法是语料脚本的接头暗号" {
-  cites(TiffNotByteExact(6400L, 6925, 533).to_string(), [
-    "refusing to rewrite this bare TIFF",
-  ])
+/// `ci/crosscheck_real.py` 认设计内拒绝靠的是句子形状＋句里那几个数
+/// （CLI 打的是 `Show` 文案，不是变体名）。这里逐字钉整句：改文案会先红在
+/// 这里，而不是让对拍脚本悄悄把整批文件重算成失败——反过来说，脚本那边
+/// 只认这些句子，多出来的形状一律落进 triage。
+test "语料脚本接头暗号：每一句设计内拒绝都钉成整句" {
+  let exact : Array[(MetaError, String)] = [
+    (
+      TiffNotByteExact(6400L, 6925, 533),
+      "refusing to rewrite this bare TIFF: its IFD0 sits at offset 6400, and the file's 6925 byte(s) are not what the metadata model rebuilds (533 byte(s)); the difference is bytes the model does not hold, and writing would drop them",
+    ),
+    (
+      UnsupportedType(0x014a, 13),
+      "tag 0x014a uses TIFF type 13, which this version does not decode",
+    ),
+    (
+      ValueOffsetOutOfRange(0x015b, 294),
+      "tag 0x015b points to offset 294, outside the block",
+    ),
+    (
+      SubIfdOutOfRange(0x8769, 4048),
+      "sub-IFD pointer of tag 0x8769 points to offset 4048, outside the block",
+    ),
+    (IfdOffsetOutOfRange(65536L), "IFD offset 65536 points outside the block"),
+    (
+      EntryTooLarge(10, 0, 132, 78),
+      "tag 0x0000 at offset 10 declares 132 byte(s), only 78 left",
+    ),
+    (NotPng(1), "not a PNG: the 8-byte signature differs at offset 1"),
+    (BadTiffHeader(12), "no TIFF header ('II' or 'MM') at offset 12"),
+    (BadByteOrder(0), "byte-order mark at offset 0 is neither 'II' nor 'MM'"),
+    (NotJpeg(7), "no JPEG start-of-image marker (0xffd8) at offset 7"),
+    (
+      UnknownFormat(0),
+      "none of the JPEG, PNG or TIFF magics is at offset 0; the container cannot be identified",
+    ),
+  ]
+  for c in exact {
+    let (e, s) = c
+    @test.assert_eq(e.to_string(), s)
+  }
+  @test.assert_eq(exact.length(), 11)
 }
 
 ///|

@@ -10,6 +10,13 @@
 文件事实的差集）也一样——语料里只会出现其中两种说法，写成"查个子串就放行"
 照样全绿，四态真值表得在这里摆全。
 
+这一轮再加四组：`TiffRefusalNumbers` / `TiffRefusalRecheck` / `TiffWalk` /
+`ReadRefusal`，钉的是**设计内拒绝的分类判据**。为什么语料抓不到它：那句拒绝里
+的数是库自己报的（IFD0 在哪、文件多少字节、模型重建多少字节、哪个 tag 用了哪个
+类型码、指针越出到哪个偏移）。库把数报错时，语料只会把同一句谎话原样收下，
+再按"按设计拒绝"记进分母——绿得理直气壮。只有拿这个文件的字节反着算一遍，
+才分得出"这条拒绝真是设计内的"和"这句话是编的"。
+
 跑法（不需要语料，也不需要 moon）：
 
     python ci/crosscheck_selftest.py -v
@@ -24,12 +31,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from crosscheck_real import (  # noqa: E402
+    TIFF_TYPE_SIZES,
     XMP_MARKS,
     gps_via_exif_pointer,
     nested_gps_entries,
     out_dir_inside_corpus,
     privacy_expectations,
+    read_refusal,
     strip_claims,
+    tiff_entry_claims,
+    tiff_entry_types,
+    tiff_ifd0,
+    tiff_refusal_numbers,
+    tiff_refusal_problems,
     xmp_flag_problems,
     xmp_injected,
     zero_length_entries,
@@ -397,6 +411,386 @@ class StripClaims(unittest.TestCase):
         # 前缀换掉、否定句也没有：两个载体各算一条"没点名"
         res = strip_claims("清完了。\n已写出 out.jpg", True, True)
         self.assertEqual(len(res), 2)
+
+
+# 设计内拒绝的复核。句子措辞不是这里编的：那十一句由
+# moonmeta_error_wbtest.mbt 逐字钉成整句，这里按同一句拼出带数的版本。
+def say_tiff_refuse(ifd0, total, rebuilt):
+    return (
+        "x.tif: refusing to rewrite this bare TIFF: its IFD0 sits at offset {}, "
+        "and the file's {} byte(s) are not what the metadata model rebuilds "
+        "({} byte(s)); the difference is bytes the model does not hold, "
+        "and writing would drop them"
+    ).format(ifd0, total, rebuilt)
+
+
+def say_type(tag, code):
+    return "x.tif: tag {} uses TIFF type {}, which this version does not decode".format(
+        tag, code
+    )
+
+
+def say_pointer(tag, off):
+    return "x.tif: tag {} points to offset {}, outside the block".format(tag, off)
+
+
+def say_subifd(tag, off):
+    return "x.tif: sub-IFD pointer of tag {} points to offset {}, outside the block".format(
+        tag, off
+    )
+
+
+def say_ifd_offset(off):
+    return "x.tif: IFD offset {} points outside the block".format(off)
+
+
+def say_declares(tag, off, declared, avail):
+    return "x.tif: tag {} at offset {} declares {} byte(s), only {} left".format(
+        tag, off, declared, avail
+    )
+
+
+def say_not_png(off):
+    return "x.png: not a PNG: the 8-byte signature differs at offset {}".format(off)
+
+
+def make_tiff(rows, extra=(), ifd0=8, little=True):
+    """合成一张最小裸 TIFF：头 +（空洞补零）+ 主 IFD + 排在它后面的子 IFD。
+
+    rows = [(tag, type, count, 值字段)]，值字段给 int 按 4 字节存，给 bytes 左对齐补零，
+    给 None 就填 `extra` 里同 tag 那条子 IFD 的偏移。
+    extra = [(指针 tag, 子条目表)]，指针一律按 LONG(4) 存——脚本只跟 LONG 指针。
+    """
+    o = "little" if little else "big"
+
+    def pack(entries, nxt):
+        out = bytearray(len(entries).to_bytes(2, o))
+        for tag, typ, count, val in entries:
+            v = (
+                val.to_bytes(4, o)
+                if isinstance(val, int)
+                else (v_bytes(val)[:4].ljust(4, b"\x00"))
+            )
+            out += (
+                tag.to_bytes(2, o)
+                + typ.to_bytes(2, o)
+                + count.to_bytes(4, o)
+                + v
+            )
+        out += nxt.to_bytes(4, o)
+        return bytes(out)
+
+    body_len = 2 + 12 * len(rows) + 4
+    off = ifd0 + body_len
+    patch = {}
+    tail = b""
+    for ptr_tag, sub_rows in extra:
+        patch[ptr_tag] = off
+        blob = pack(sub_rows, 0)
+        tail += blob
+        off += len(blob)
+    filled = []
+    for tag, typ, count, val in rows:
+        filled.append((tag, typ, count, patch.get(tag) if val is None else val))
+    head = (b"II" if little else b"MM") + (42).to_bytes(2, o) + ifd0.to_bytes(4, o)
+    return head + b"\x00" * (ifd0 - len(head)) + pack(filled, 0) + tail
+
+
+def v_bytes(val):
+    return val if isinstance(val, bytes) else str(val).encode()
+
+
+class TiffRefusalNumbers(unittest.TestCase):
+    def test_三个数取得出(self):
+        self.assertEqual(
+            tiff_refusal_numbers(say_tiff_refuse(7696, 7926, 240)),
+            (7696, 7926, 240),
+        )
+
+    def test_句子换了形状_就取不出(self):
+        # 取不出 → tiff_refusal_problems 给一条说明 → 那格落回 triage。
+        # 不许有第三种"静悄悄放行"的路径。
+        self.assertIsNone(tiff_refusal_numbers("refusing to rewrite this bare TIFF"))
+        problems = tiff_refusal_problems("refusing", b"II*\x00" + b"\x00" * 40)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("换了形状", problems[0])
+
+
+class TiffRefusalRecheck(unittest.TestCase):
+    def setUp(self):
+        self.blob = make_tiff([(0x0112, 3, 1, 1), (0x0131, 2, 7, b"hello\x00")])
+
+    def test_数字与文件一致时放行(self):
+        text = say_tiff_refuse(8, len(self.blob), 20)
+        self.assertEqual(tiff_refusal_problems(text, self.blob), [])
+
+    def test_IFD0偏移报错了要红(self):
+        text = say_tiff_refuse(8 + 1000, len(self.blob), 20)
+        notes = tiff_refusal_problems(text, self.blob)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("文件头自己写的是 8", notes[0])
+
+    def test_文件长度报错了要红(self):
+        notes = tiff_refusal_problems(
+            say_tiff_refuse(8, len(self.blob) + 1, 20), self.blob
+        )
+        self.assertIn("实际 {} 字节".format(len(self.blob)), notes[0])
+
+    def test_重建不比文件短_那句会丢字节就不成立(self):
+        # 这一格钉的是拒绝的**理由**：模型重建出来的东西如果比文件还长，
+        # 那"写下去会丢字节"根本不是事实，这个拒绝就不该被算成设计内。
+        notes = tiff_refusal_problems(
+            say_tiff_refuse(8, len(self.blob), len(self.blob)), self.blob
+        )
+        self.assertEqual(len(notes), 1)
+        self.assertIn("写下去会丢字节", notes[0])
+
+    def test_头不是TIFF时不许自称裸TIFF(self):
+        blob = b"MM\x00\x2b" + b"\x00" * 34  # 魔数对，但版本号不是 42
+        notes = tiff_refusal_problems(say_tiff_refuse(8, len(blob), 20), blob)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("不是 II/MM + 42", notes[0])
+
+    def test_大端文件也要复核得过(self):
+        # 只认小端的复核会把大端文件一律判成"数字对不上"——那是假红，
+        # 会让整批合法拒绝涌进 triage，然后有人把它改回不复核。
+        blob = make_tiff([(0x0112, 3, 1, 1)], little=False)
+        self.assertEqual(tiff_ifd0(blob), 8)
+        self.assertEqual(tiff_refusal_problems(say_tiff_refuse(8, len(blob), 20), blob), [])
+
+
+class TiffWalk(unittest.TestCase):
+    def test_子目录里的条目也走得到(self):
+        blob = make_tiff(
+            [(0x0112, 3, 1, 1), (0x8769, 4, 1, None)],
+            extra=[(0x8769, [(0x9003, 13, 1, 0)])],
+        )
+        types = tiff_entry_types(blob)
+        self.assertEqual(types.get(0x9003), {13})
+
+    def test_SHORT指针不跟_宁可找不到(self):
+        # 子 IFD 指针写成 SHORT 的文件不是没有；猜错存法就是编证据，
+        # 所以只跟 LONG(4)。这里要看到的是"没走到"，不是"走到了但报错"。
+        blob = make_tiff([(0x8769, 3, 1, 26)])
+        self.assertNotIn(0x9003, tiff_entry_types(blob))
+
+    def test_条目数越界时停在读到的部分(self):
+        head = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little")
+        blob = head + (60000).to_bytes(2, "little") + b"\x00" * 40
+        self.assertEqual(tiff_entry_types(blob), {})
+
+    def test_指针值的条目_算出声明字节与值偏移(self):
+        # RATIONAL(5) 每个 8 字节，count=2 → 16 字节 > 4，值偏移就是第 12 字节那个指针
+        blob = make_tiff([(0x015b, 5, 2, 65536)])
+        self.assertEqual(tiff_entry_claims(blob)[0x015B], [(5, 16, 65536, 65536)])
+
+    def test_放得进四字的值_偏移在条目自己身上(self):
+        blob = make_tiff([(0x0112, 3, 1, 1)])
+        # 表在 8，第一条从 10 开始，内联值在第 10+8 字节
+        self.assertEqual(tiff_entry_claims(blob)[0x0112], [(3, 2, 18, 1)])
+
+    def test_类型码不存在_就没有声明字节可算(self):
+        # 编不出宽度的类型码不许硬凑一个数：那一格只能退回分诊
+        blob = make_tiff([(0x0212, 4099, 7, 65536)])
+        self.assertEqual(tiff_entry_claims(blob)[0x0212], [(4099, None, None, 65536)])
+
+
+class ReadRefusal(unittest.TestCase):
+    def setUp(self):
+        self.blob = make_tiff(
+            [
+                (0x014a, 13, 1, 0),
+                (0x0112, 3, 1, 1),
+                (0x015b, 5, 2, 65536),  # 16 字节从 65536 起：整个文件外
+                (0x0160, 5, 1, 4),  # 8 字节从 4 起：落得进这个文件
+            ],
+        )
+
+    def test_类型11到13是边界条款(self):
+        bucket, notes = read_refusal(say_type("0x014a", 13), self.blob)
+        self.assertEqual(bucket, "designed-unsupported-type")
+        self.assertEqual(notes, [])
+
+    def test_编号不存在算坏文件_桶要分开(self):
+        blob = make_tiff([(0x0212, 4099, 1, 0)])
+        bucket, _ = read_refusal(say_type("0x0212", 4099), blob)
+        self.assertEqual(bucket, "designed-undefined-type")
+
+    def test_字节里那条不是这个类型就红(self):
+        # 库里把类型码读错一位，语料上是绿的——只有这一格能抓。
+        bucket, notes = read_refusal(say_type("0x0112", 13), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("复核不上", notes[0])
+
+    def test_这条tag不在文件里也红(self):
+        bucket, notes = read_refusal(say_type("0x0100", 13), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("（没有这条）", notes[0])
+
+    def test_指针本身越出文件_算设计内(self):
+        bucket, _ = read_refusal(say_pointer("0x015b", 65536), self.blob)
+        self.assertEqual(bucket, "designed-malformed-pointer")
+
+    def test_指针在文件内但值越过文件尾_也算设计内(self):
+        # 旧判据只认"指针本身越出去"，于是 104 个陌生 TIFF 里 4 个真越界的
+        # 被报成复核不通过。那句"越出块外"说的是值的那段字节放不下。
+        blob = make_tiff([(0x015b, 5, 2, 20)])  # 16 字节，指针 20 在 26 字节的文件内
+        self.assertLess(20, len(blob))
+        bucket, notes = read_refusal(say_pointer("0x015b", 20), blob)
+        self.assertEqual(bucket, "designed-malformed-pointer", notes)
+
+    def test_指针和值都放得进_不许拿设计内当解释(self):
+        bucket, notes = read_refusal(say_pointer("0x0160", 4), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("复核不通过", notes[0])
+
+    def test_字节里没有这条指针_数字复核不上(self):
+        # 内联值那条根本不可能报出"值指针越界"；拿它凑数就是编证据
+        bucket, notes = read_refusal(say_pointer("0x0112", 30), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_不是TIFF头时无从复核块边界(self):
+        bucket, notes = read_refusal(say_pointer("0x014a", 9999), b"\x00" * 30)
+        self.assertIsNone(bucket)
+        self.assertIn("无从复核", notes[0])
+
+    def test_魔数说对了算设计内(self):
+        bucket, _ = read_refusal(say_not_png(0), b"not a png at all")
+        self.assertEqual(bucket, "designed-wrong-magic")
+
+    def test_魔数其实就在那里却说没有要红(self):
+        blob = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+        bucket, notes = read_refusal(say_not_png(0), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("就是签名", notes[0])
+
+    def test_句子形状不认识时既不放行也不编说明(self):
+        bucket, notes = read_refusal("some other wording entirely", self.blob)
+        self.assertIsNone(bucket)
+        self.assertEqual(notes, [])
+
+
+class SubIfdRefusal(unittest.TestCase):
+    def setUp(self):
+        # Exif 指针（LONG、count=1）指向 4048，文件只有 26 字节
+        self.blob = make_tiff([(0x8769, 4, 1, 4048)])
+
+    def test_指针越出文件且字节里那条就是它_算设计内(self):
+        bucket, notes = read_refusal(say_subifd("0x8769", 4048), self.blob)
+        self.assertEqual(bucket, "designed-malformed-pointer", notes)
+
+    def test_值字段不是那个数_数字复核不上(self):
+        bucket, notes = read_refusal(say_subifd("0x8769", 1234), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_指针落得进去_不许拿设计内当解释(self):
+        blob = make_tiff([(0x8769, 4, 1, 20)])
+        bucket, notes = read_refusal(say_subifd("0x8769", 20), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("复核不通过", notes[0])
+
+
+class IfdOffsetRefusal(unittest.TestCase):
+    def test_文件头写的就是它且越出文件_算设计内(self):
+        blob = b"II" + (42).to_bytes(2, "little") + (9000).to_bytes(4, "little") + b"\x00" * 20
+        bucket, notes = read_refusal(say_ifd_offset(9000), blob)
+        self.assertEqual(bucket, "designed-malformed-pointer", notes)
+
+    def test_文件头写的是别的数_数字复核不上(self):
+        blob = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little") + b"\x00" * 20
+        bucket, notes = read_refusal(say_ifd_offset(9000), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_偏移落得进文件_不许拿设计内当解释(self):
+        blob = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little") + b"\x00" * 20
+        bucket, notes = read_refusal(say_ifd_offset(8), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("复核不通过", notes[0])
+
+
+class DeclaredBytesRefusal(unittest.TestCase):
+    def setUp(self):
+        # 头 + 空洞 + 表长 11 条（132 字节）却只给了 20 字节的表体
+        self.blob = (
+            b"II"
+            + (42).to_bytes(2, "little")
+            + (8).to_bytes(4, "little")
+            + (11).to_bytes(2, "little")
+            + b"\x00" * 20
+        )
+
+    def test_目录表放不下_三个数都对得上_算设计内(self):
+        off = 10
+        blob = self.blob
+        bucket, notes = read_refusal(
+            say_declares("0x0000", off, 132, len(blob) - off), blob
+        )
+        self.assertEqual(bucket, "designed-truncated-value", notes)
+
+    def test_声明字节数与条目数对不上_数字复核不上(self):
+        blob = self.blob
+        bucket, notes = read_refusal(
+            say_declares("0x0000", 10, 144, len(blob) - 10), blob
+        )
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_剩余字节数与文件长对不上_要红(self):
+        bucket, notes = read_refusal(say_declares("0x0000", 10, 132, 9999), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("两数对不上", notes[0])
+
+    def test_声明的字节其实够用_那句不成立(self):
+        bucket, notes = read_refusal(say_declares("0x0000", 10, 4, 20), self.blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那句不成立", notes[0])
+
+    def test_单个条目那一支也算得过(self):
+        # tag 不记 0 的那一支实际到不了（前面两道长度闸挡着），复算照样做
+        blob = make_tiff([(0x015b, 5, 1, 20)])  # RATIONAL ×1 = 8 字节，从 20 起
+        bucket, notes = read_refusal(
+            say_declares("0x015b", 20, 8, len(blob) - 20), blob
+        )
+        self.assertEqual(bucket, "designed-truncated-value", notes)
+
+    def test_单个条目报错了字节数_数字复核不上(self):
+        blob = make_tiff([(0x015b, 5, 1, 20)])
+        bucket, notes = read_refusal(
+            say_declares("0x015b", 20, 99, len(blob) - 20), blob
+        )
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+
+class TiffTypeSizes(unittest.TestCase):
+    # 这张表是脚本自己抄规范的，与库的 type_size 是两份。两份都得有人钉：
+    # 库那份在 moonmeta_value_test.mbt，这一份在这里。
+    SPEC = [
+        (1, 1),
+        (2, 1),
+        (3, 2),
+        (4, 4),
+        (5, 8),
+        (6, 1),
+        (7, 1),
+        (8, 2),
+        (9, 4),
+        (10, 8),
+        (11, 4),
+        (12, 8),
+        (13, 4),
+    ]
+
+    def test_规范里13个类型码逐个对(self):
+        for code, size in self.SPEC:
+            self.assertEqual(TIFF_TYPE_SIZES.get(code), size, "类型码 {}".format(code))
+
+    def test_规范没给的编号不许有宽度(self):
+        for code in (0, 14, 99, -1):
+            self.assertNotIn(code, TIFF_TYPE_SIZES)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,10 @@
    条目、字节里搜不到包标记与敏感键，而 CLI 那句话必须与这个文件的事实对齐。
    另有一条更硬的性质：**凡是 `redact` 写得出的文件，`strip` 也必须写得出来**，
    所以 strip 的非零退出码一律算分诊，不去匹配任何错误措辞。
+6. **拒绝也要复核**——库里每一句"这一步我不做"都带着数字（IFD0 在哪、文件多少字节、
+   模型重建出多少字节、哪个 tag 用了哪个类型码、指针越出到哪个偏移）。
+   数字对不对，由这个文件自己的字节说了算；复核不上就落回 triage。
+   量尺那一侧同理：`verify()` 过了不等于读得懂，分母只算连像素都解得开的那些。
 
 "点名哪些条目"这件事刻意不在这个脚本里再抄一份策略：它取自 `audit --json`
 的输出。策略只有一个来源（库），这个脚本只负责"另一个人怎么看"。
@@ -36,14 +40,38 @@
 分桶口径（每个桶都要单独解读，混在一起看会骗人）：
 - `ok`：读侧集合一致，且脱敏产物过了下面 2 的全部复查。
 - `refused-rewrite`：读侧一致，但裸 TIFF 的重写判据主动拒绝（写侧因此**没有**被验证）。
-- `designed-refusal`：读侧就落在库明说的"这一步我不做"名单里。
+  那句拒绝里的三个数（IFD0 偏移 / 文件字节数 / 模型重建的字节数）由这个文件自己的
+  字节复核，复核不上就落回 `triage`——措辞不是判据。
+- `designed-unsupported-type` / `designed-undefined-type`：读侧拒绝说某个 tag 用了
+  类型 N，N 由脚本自己走一遍 IFD 复核（11/12/13 是边界条款里的"有定义但不解码"，
+  其余编号 TIFF 6.0 根本没有，文件本身是坏的）。
+- `designed-malformed-pointer`：拒绝说值指针越出块外——**值的那段字节**放不下才算
+  （指针本身在文件内、但 pointer + 声明字节数越过文件尾，同样是越界；这一半先前漏了，
+  104 个陌生 TIFF 的语料上有 4 个撞在它上面被误判），子目录指针则只要求头两字节落得进来。
+  声明字节数由脚本自己按 TIFF 6.0 的宽度表从这个文件的条目算，不看引擎的表。
+  已知限制：这一支只在文件的 TIFF 头就落在偏移 0 时才判——那时"块"就是整个文件，
+  块长可以直接从字节量出来。JPEG 的 APP1 / PNG 的 `eXIf` 载荷里块长不等于文件长，
+  那种句子一律退回 `triage` 而不是放行；目前三批语料里这样的格子是 0。
+- `designed-truncated-value`：拒绝说某个偏移之后声明的字节放不下（`偏移 + 剩余 == 文件长`
+  且声明 > 剩余）。这一支实际只有"整张目录表放不下"（tag 记 0）会命中：值那一支
+  被前面两道长度闸挡在外面，脚本仍然按同一套数复核。
+- `designed-wrong-magic`：拒绝说容器魔数不对，且那几个字节确实不是它说的那三种。
 - `unreadable-by-pillow`：量尺自己打不开，不进任何比率。
-- `triage`：以上都不是，需要人看。
+- `triage`：以上都不是（包括**复核不通过**的设计内拒绝），需要人看。
+
+分母也是两层：`verify()` 只查结构、`load()` 才真解像素，只有后者进分母。
+一把解不开像素的尺子说"这个文件里没有条目"没有证明力。
+
+量尺进不去的那批不是免检：第二趟只对它们跑 `read`，把每一句读侧拒绝的数字拿
+这个文件自己的字节复核一遍（指针越没越出文件、类型码在不在目录表里、三种魔数
+对不对）——这一类判据不需要一把能解像素的尺子。计数单记 `secondpass-*`，
+不进任何比率的分母；复核不上照样落 `triage`。
 """
 
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -92,17 +120,375 @@ XMP_SENSITIVE = (
     b"MP:RegionInfo",  # 微软 XMP 里的人脸区域
 )
 
-# 这些错误名字是库明说的"这一步我不做"，属于设计内拒绝，不算对拍失败
-DESIGNED_REFUSALS = (
-    "UnsupportedType",  # 还解不了 FLOAT / DOUBLE / IFD 这三种类型码
-    "ExtraMetadata",  # 压缩流之后还有元数据、或重复 APP1
-    "UnknownFormat",  # 容器认不出来
-    "NotJpeg",
-    "NotPng",
-    "BadTiffHeader",
-    "BadByteOrder",
-    "TooShort",
+# 读侧的"这一步我不做"不能按变体名匹配。CLI 打出来的是 `Show` 的措辞，
+# 那句话里从来没有 `UnsupportedType` 这样的名字——旧的那份名单（八个变体名）
+# 是死闸：拿 104 个陌生 TIFF 跑，一格都没命中，全数落进 triage。
+# 现在的分类一律带证据：**拒绝里报出的那个数字，必须能在这一号文件自己的字节上复核**；
+# 复核不成就照旧分诊。宁可少放一个桶，不许拿措辞当判据。
+TYPE_WITH_SIZE = (11, 12, 13)  # TIFF 6.0 里有定义、这一版按边界条款不解码
+# 不在这三个里、却又被报成"用了类型 N"的编号，TIFF 6.0 根本没有：文件本身是坏的
+
+# 类型码 → 单组件字节数，TIFF 6.0 的表。这里刻意**不**从库里 import：
+# 拿被复核方自己的表去复核它的数，那道检查就是空的（import 只防得住抄错，
+# 防不住错得一致）。它与库的 `type_size` 由 moonmeta_value_test.mbt 那条
+# "type_size：13 个类型码全覆盖，越界返回 None" 各自钉住。
+TIFF_TYPE_SIZES = {
+    1: 1,
+    2: 1,
+    3: 2,
+    4: 4,
+    5: 8,
+    6: 1,
+    7: 1,
+    8: 2,
+    9: 4,
+    10: 8,
+    11: 4,
+    12: 8,
+    13: 4,
+}
+
+RE_TAG = re.compile(r"tag (0x[0-9a-f]{4})")
+RE_TYPE = re.compile(r"uses TIFF type (\d+), which this version does not decode")
+RE_POINTER_OUT = re.compile(r"tag (0x[0-9a-f]{4}) points to offset (\d+), outside the block")
+RE_SUBIFD_OUT = re.compile(
+    r"sub-IFD pointer of tag (0x[0-9a-f]{4}) points to offset (\d+), outside the block"
 )
+RE_IFD_OUT = re.compile(r"IFD offset (\d+) points outside the block")
+RE_ENTRY_LEN = re.compile(
+    r"tag (0x[0-9a-f]{4}) at offset (\d+) declares (\d+) byte\(s\), only (\d+) left"
+)
+RE_NO_TIFF_HEADER = re.compile(r"no TIFF header \('II' or 'MM'\) at offset (\d+)")
+RE_BAD_ORDER = re.compile(r"byte-order mark at offset (\d+) is neither 'II' nor 'MM'")
+RE_NOT_PNG = re.compile(r"not a PNG: the 8-byte signature differs at offset (\d+)")
+RE_NOT_JPEG = re.compile(r"no JPEG start-of-image marker \(0xffd8\) at offset (\d+)")
+RE_NO_MAGIC = re.compile(r"none of the JPEG, PNG or TIFF magics is at offset (\d+)")
+RE_TIFF_REFUSED = re.compile(
+    r"refusing to rewrite this bare TIFF: its IFD0 sits at offset (\d+), "
+    r"and the file's (\d+) byte\(s\) are not what the metadata model "
+    r"rebuilds \((\d+) byte\(s\)"
+)
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_IFD_ENTRIES = 4096  # 一张 IFD 里条目数的地板；超过就当结构坏了，别去数
+
+
+def tiff_reader(blob):
+    """按 TIFF 头里的字节序返回 (u16, u32)；头不对返回 (None, None)。"""
+    little = blob[:2] == b"II"
+    if not little and blob[:2] != b"MM":
+        return None, None
+
+    def u16(off):
+        if off is None or off < 0 or off + 2 > len(blob):
+            return None
+        return int.from_bytes(blob[off : off + 2], "little" if little else "big")
+
+    def u32(off):
+        if off is None or off < 0 or off + 4 > len(blob):
+            return None
+        return int.from_bytes(blob[off : off + 4], "little" if little else "big")
+
+    return u16, u32
+
+
+def tiff_ifd0(blob):
+    """文件头自己写明的 IFD0 偏移；不是 TIFF 头（或不是 42）返回 None。"""
+    u16, u32 = tiff_reader(blob)
+    if u16 is None:
+        return None
+    if u16(2) != 42:
+        return None
+    return u32(4)
+
+
+def tiff_entry_claims(blob):
+    """走一遍 IFD 链与 Exif/GPS/Interop 子目录：
+    {tag: [(类型码, 声明字节数或 None, 值偏移或 None, 值字段那个 32 位整数)]}。
+
+    声明字节数与值偏移按 TIFF 的存法在这里自己算（count × 规范里的类型宽度；
+    只有超过 4 字节才去看第 12 字节那个指针），宽度表是抄规范的、不看引擎的表
+    ——这一趟要复核的正是引擎报出来的那些数，拿它的表复核等于问它自己。
+    结构一异常就停在已经读到的那部分：宁可找不到，也绝不编证据。
+    """
+    u16, u32 = tiff_reader(blob)
+    out = {}
+    if u16 is None:
+        return out
+    seen = set()
+
+    def walk(off, depth):
+        if off is None or off in seen or depth > 2:
+            return
+        seen.add(off)
+        n = u16(off)
+        if n is None or n > MAX_IFD_ENTRIES or off + 2 + 12 * n > len(blob):
+            return
+        subs = []
+        for i in range(n):
+            e = off + 2 + 12 * i
+            tag, typ = u16(e), u16(e + 2)
+            count, field = u32(e + 4), u32(e + 8)
+            if tag is None or typ is None or count is None or field is None:
+                return
+            size = TIFF_TYPE_SIZES.get(typ)
+            total = None if size is None else count * size
+            voff = None
+            if total is not None:
+                voff = e + 8 if total <= 4 else field
+            out.setdefault(tag, []).append((typ, total, voff, field))
+            if tag in POINTERS and typ == 4 and count == 1:
+                subs.append(field)
+        nxt = u32(off + 2 + 12 * n)  # 下一张 IFD（缩略图那类）；放不下就停在这里
+        if nxt is not None:
+            walk(nxt, depth + 1)
+        for s in subs:  # 子目录
+            walk(s, depth + 2)
+
+    walk(tiff_ifd0(blob), 0)
+    return out
+
+
+def tiff_entry_types(blob):
+    """{tag: set(声明的类型码)}——只取 tiff_entry_claims 的类型那一列。"""
+    return {tag: {row[0] for row in rows} for tag, rows in tiff_entry_claims(blob).items()}
+
+
+def tiff_refusal_numbers(text):
+    """从那句拒绝里取出三个数：(IFD0 偏移, 文件字节数, 模型重建的字节数)。"""
+    m = RE_TIFF_REFUSED.search(text)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def tiff_refusal_problems(text, blob):
+    """那句拒绝的三个数对不对。返回问题列表，空表 = 复核通过。"""
+    numbers = tiff_refusal_numbers(text)
+    if numbers is None:
+        return [
+            "裸 TIFF 的拒绝那句话换了形状，三个数取不出来，复核无从做起: "
+            + text.strip()[:160]
+        ]
+    ifd0, total, rebuilt = numbers
+    out = []
+    real = tiff_ifd0(blob)
+    if real is None:
+        out.append("句子里说这是裸 TIFF，文件头却不是 II/MM + 42")
+    elif real != ifd0:
+        out.append(
+            "句子说 IFD0 在偏移 {}，文件头自己写的是 {}".format(ifd0, real)
+        )
+    if total != len(blob):
+        out.append("句子说文件 {} 字节，实际 {} 字节".format(total, len(blob)))
+    if rebuilt >= total:
+        out.append(
+            "句子说模型重建出 {} 字节，并不比文件的 {} 字节短——"
+            "那句「写下去会丢字节」就不成立".format(rebuilt, total)
+        )
+    return out
+
+
+def read_refusal(text, blob):
+    """读侧的失败落在设计内吗。返回 (桶名或 None, 分诊说明列表)。
+
+    每一支都拿这个文件的字节复核；复核不过就把说明交回去，让它留在 triage。
+    """
+    m = RE_TYPE.search(text)
+    if m:
+        code = int(m.group(1))
+        tag_m = RE_TAG.search(text)
+        tag = int(tag_m.group(1), 16) if tag_m else None
+        declared = tiff_entry_types(blob).get(tag, set()) if tag is not None else set()
+        if code not in declared:
+            return None, [
+                "拒绝说 tag {} 用类型 {}，可我们自己在这些字节里读到的类型是 {}："
+                "那个数字复核不上".format(
+                    tag_m.group(1) if tag_m else "?",
+                    code,
+                    sorted(declared) if declared else "（没有这条）",
+                )
+            ]
+        if code in TYPE_WITH_SIZE:
+            return "designed-unsupported-type", []
+        return "designed-undefined-type", []
+
+    m = RE_SUBIFD_OUT.search(text)
+    if m:
+        tag = int(m.group(1), 16)
+        off = int(m.group(2))
+        if tiff_ifd0(blob) is None:
+            return None, [
+                "说子目录指针越出块外，可这个文件连 TIFF 头都不是：块的分界无从复核"
+            ]
+        rows = tiff_entry_claims(blob).get(tag, [])
+        if not any(row[3] == off for row in rows):
+            return None, [
+                "说 tag {} 的子目录指针越界，可字节里那条的值字段不是偏移 {}（读到的：{}）："
+                "那个数字复核不上".format(
+                    m.group(1),
+                    off,
+                    sorted({str(r[3]) for r in rows}) or "（没有这条）",
+                )
+            ]
+        # 引擎对子目录指针只要求头两字节落进来（它随后才读条目数）。
+        if off + 2 > len(blob):
+            return "designed-malformed-pointer", []
+        return None, [
+            "说子目录指针 {} 越出块外，可整个文件 {} 字节，头两字节落得进去：复核不通过".format(
+                off, len(blob)
+            )
+        ]
+
+    m = RE_POINTER_OUT.search(text)
+    if m:
+        tag = int(m.group(1), 16)
+        off = int(m.group(2))
+        if tiff_ifd0(blob) is None:
+            return None, [
+                "说指针越出块外，可这个文件连 TIFF 头都不是：块的分界无从复核"
+            ]
+        # "越出块外"说的是**值的那段字节**放不下，不是指针本身落在文件外：
+        # 只按后者判会把 4 个真越界的文件报成复核不通过（104 个陌生 TIFF 第一轮
+        # 就撞在这上面）。声明字节数由这个文件的条目自己算出来。
+        hits = [
+            row
+            for row in tiff_entry_claims(blob).get(tag, [])
+            if row[1] is not None and row[1] > 4 and row[2] == off
+        ]
+        if not hits:
+            return None, [
+                "说 tag {} 的值指针落在偏移 {} 越界，可字节里没有一条这样的条目"
+                "（该 tag 读到的值偏移：{}）：那个数字复核不上".format(
+                    m.group(1),
+                    off,
+                    sorted({str(r[2]) for r in tiff_entry_claims(blob).get(tag, [])})
+                    or "（没有这条）",
+                )
+            ]
+        if any(off + row[1] > len(blob) for row in hits):
+            return "designed-malformed-pointer", []
+        return None, [
+            "说指针 {} 越出块外，可它声明的 {} 字节从 {} 起放得进这个 {} 字节的文件："
+            "复核不通过".format(off, min(row[1] for row in hits), off, len(blob))
+        ]
+
+    m = RE_ENTRY_LEN.search(text)
+    if m:
+        off = int(m.group(2))
+        declared = int(m.group(3))
+        avail = int(m.group(4))
+        if tiff_ifd0(blob) is None:
+            return None, [
+                "说条目声明的字节放不下，可这个文件连 TIFF 头都不是：块的分界无从复核"
+            ]
+        out = []
+        if off + avail != len(blob):
+            out.append(
+                "句子说偏移 {} 之后还剩 {} 字节，可这个文件长 {} 字节，两数对不上".format(
+                    off, avail, len(blob)
+                )
+            )
+        if declared <= avail:
+            out.append(
+                "句子说声明的 {} 字节放不下，可剩下的 {} 字节够用：那句不成立".format(
+                    declared, avail
+                )
+            )
+        if m.group(1) == "0x0000":
+            # tag 记 0 是"整张目录表放不下"那一支：声明的该是 条目数 × 12，
+            # 条目数就是表体前那两个字节（偏移 off-2 处的 u16）。
+            u16, _u32 = tiff_reader(blob)
+            n = u16(off - 2) if u16 is not None else None
+            if n is None or n * 12 != declared:
+                out.append(
+                    "目录表那句说声明 {} 字节，可偏移 {} 前那两个字节里的条目数是 {}"
+                    "（× 12 = {}）：那个数字复核不上".format(
+                        declared, off, n, None if n is None else n * 12
+                    )
+                )
+        else:
+            tag = int(m.group(1), 16)
+            rows = tiff_entry_claims(blob).get(tag, [])
+            if not any(row[2] == off and row[1] == declared for row in rows):
+                out.append(
+                    "句子说 tag {} 在偏移 {} 声明 {} 字节，可字节里那条算出来的是 {}："
+                    "那个数字复核不上".format(
+                        m.group(1),
+                        off,
+                        declared,
+                        sorted({str(r[1]) for r in rows if r[2] == off})
+                        or "（没有这条）",
+                    )
+                )
+        if out:
+            return None, out
+        return "designed-truncated-value", []
+
+    m = RE_IFD_OUT.search(text)
+    if m:
+        off = int(m.group(1))
+        real = tiff_ifd0(blob)
+        if real is None:
+            return None, [
+                "说 IFD 偏移越出块外，可这个文件连 TIFF 头都不是：块的分界无从复核"
+            ]
+        if real != off:
+            return None, [
+                "句子里的 IFD 偏移是 {}，可文件头第 4 字节写的是 {}：那个数字复核不上".format(
+                    off, real
+                )
+            ]
+        if off + 2 > len(blob):
+            return "designed-malformed-pointer", []
+        return None, [
+            "说 IFD 偏移 {} 越出块外，可整个文件 {} 字节，它的头两字节落得进去：复核不通过".format(
+                off, len(blob)
+            )
+        ]
+
+    for rx, want in (
+        (RE_NO_TIFF_HEADER, (b"II", b"MM")),
+        (RE_BAD_ORDER, (b"II", b"MM")),
+    ):
+        m = rx.search(text)
+        if m:
+            off = int(m.group(1))
+            if blob[off : off + 2] in want:
+                return None, [
+                    "说偏移 {} 上没有 TIFF 头，可那两个字节就是 {}".format(
+                        off, blob[off : off + 2]
+                    )
+                ]
+            return "designed-wrong-magic", []
+
+    m = RE_NOT_PNG.search(text)
+    if m:
+        off = int(m.group(1))
+        if blob[off : off + 8] == PNG_SIGNATURE:
+            return None, ["说 PNG 签名在偏移 {} 对不上，可那八个字节就是签名".format(off)]
+        return "designed-wrong-magic", []
+
+    m = RE_NOT_JPEG.search(text)
+    if m:
+        off = int(m.group(1))
+        if blob[off : off + 2] == b"\xff\xd8":
+            return None, ["说偏移 {} 上没有 JPEG 起始标记，可那里就是 0xffd8".format(off)]
+        return "designed-wrong-magic", []
+
+    m = RE_NO_MAGIC.search(text)
+    if m:
+        off = int(m.group(1))
+        head = blob[off : off + 8]
+        if (
+            head[:2] in (b"II", b"MM")
+            or head == PNG_SIGNATURE
+            or head[:2] == b"\xff\xd8"
+        ):
+            return None, ["说三种魔数都不在偏移 {}，可这里就是有一种".format(off)]
+        return "designed-wrong-magic", []
+
+    return None, []
 
 
 def run_moon(moon, args, cwd):
@@ -128,6 +514,25 @@ def read_json(moon, repo, path):
         return json.loads(line), None
     except json.JSONDecodeError as e:
         return None, "JSON 解析失败: {} / 原文 {!r}".format(e, line[:200])
+
+
+def pillow_probe(path):
+    """量尺自己走到哪一步：`unopenable` / `verify-only` / `load`。
+
+    `verify()` 只查结构（它甚至要求之后不能再用它），`load()` 才真的解像素。
+    分母只认后者：一把打不开像素的尺子，说"这个文件里没有条目"没有证明力。
+    """
+    try:
+        with Image.open(path) as im:
+            im.verify()
+    except Exception:
+        return "unopenable"
+    try:
+        with Image.open(path) as im:
+            im.load()
+    except Exception:
+        return "verify-only"
+    return "load"
 
 
 def pillow_dirs(path):
@@ -453,11 +858,15 @@ def check_one(moon, repo, src, out_dir, stats):
     doc, err = read_json(moon, repo, src)
     if doc is None:
         text = err or ""
-        if any(name in text for name in DESIGNED_REFUSALS):
-            return "designed-refusal", []
         if "没有 EXIF" in text:
             return "unreadable-by-pillow", []
-        return "triage", ["read 失败但不在设计内拒绝名单里: " + text[:160]]
+        bucket, problems = read_refusal(text, src_blob)
+        if bucket:
+            stats[bucket] = stats.get(bucket, 0) + 1
+            return bucket, []
+        if problems:
+            return "triage", problems
+        return "triage", ["读侧失败，且没有任何一句形状能被字节复核: " + text[:160]]
 
     their = pillow_dirs(src)
     if their is None:  # pragma: no cover - Pillow 打不开的文件在上面就滤掉了
@@ -559,9 +968,30 @@ def check_one(moon, repo, src, out_dir, stats):
             moon, ["redact", str(src), "--policy", "strict", "-o", str(dst)], repo
         )
         if code != 0:
-            # CLI 打出来的是 Show 的措辞，不是变体名，所以只能按那句话匹配。
-            # 那句话由 moonmeta_error_wbtest.mbt 钉住：改措辞会先红在测试里。
-            if "refusing to rewrite this bare TIFF" in red_out and bucket == "ok":
+            # CLI 打出来的是 Show 的措辞，不是变体名。这句话由
+            # moonmeta_error_wbtest.mbt 钉住形状，但这里连措辞也不信任：
+            # 句子里那三个数（IFD0 偏移 / 文件字节数 / 模型重建的字节数）
+            # 必须能在这一号文件自己的字节上复核，复核不过就分诊。
+            numbers = tiff_refusal_numbers(red_out)
+            if numbers is not None:
+                problems = tiff_refusal_problems(red_out, src_blob)
+                if problems:
+                    notes.extend(problems)
+                    return "triage", notes
+                ifd0, total, rebuilt = numbers
+                stats["tiff-refused"] = stats.get("tiff-refused", 0) + 1
+                if ifd0 != 8:
+                    stats["tiff-refused-late-ifd"] = (
+                        stats.get("tiff-refused-late-ifd", 0) + 1
+                    )
+                drop = total - rebuilt
+                stats["tiff-drop-min"] = min(stats.get("tiff-drop-min", drop), drop)
+                stats["tiff-drop-max"] = max(stats.get("tiff-drop-max", drop), drop)
+                if bucket != "ok":
+                    notes.append(
+                        "redact 退出码 {}: {}".format(code, red_out.strip()[:160])
+                    )
+                    return "triage", notes
                 # 裸 TIFF 的重写判据主动拒绝：读侧已经比过，写侧按设计不做。
                 # 单独一个桶，不许混进 ok——那一格的写侧从没被验过。
                 # 拒绝必须干净：不能留下一个"看着像产物"的坏文件。
@@ -862,14 +1292,17 @@ def main():
     if args.limit:
         files = files[: args.limit]
 
-    # 分母先自证清白：Pillow 自己打不开的那些，不参与任何比率
-    usable, unreadable = [], []
+    # 分母先自证清白，而且分两层：`verify()` 只查结构，`load()` 才真的解像素。
+    # 104 个陌生 TIFF 里就有 2 个过得了前者、过不了后者（Pillow 自己报
+    # "More samples per pixel than can be decoded"）——量尺解不开的文件不能进分母。
+    usable, undecodable, unreadable = [], [], []
     for p in files:
-        try:
-            with Image.open(p) as im:
-                im.verify()
+        kind = pillow_probe(p)
+        if kind == "load":
             usable.append(p)
-        except Exception:
+        elif kind == "verify-only":
+            undecodable.append(p)
+        else:
             unreadable.append(p)
 
     buckets = {}
@@ -883,11 +1316,91 @@ def main():
         print("{}: {}{}".format(bucket, p.name, "" if not notes else " ← " + notes[0]))
         sys.stdout.flush()
 
+    # 第二趟：量尺解不开的那些文件不进分母，可它们的"按设计拒绝"照样能复核——
+    # 那一类判据（指针有没有越出文件、类型码在不在目录表里、三种魔数对不对）
+    # 只吃这个文件自己的字节，一把读不动像素的尺子拦不住它。104 个陌生 TIFF 里
+    # 有 16 个走不到第一趟，其中 10 个正是上一轮落在 triage 里的那批。
+    # 分母不变（比例还是第一趟的），计数单记 `secondpass-*`，红法一样。
+    second = {}
+    second_pass = [(p, "verify-only") for p in undecodable] + [
+        (p, "unopenable") for p in unreadable
+    ]
+    for p, kind in second_pass:
+        doc, err = read_json(args.moon, repo, p)
+        if doc is not None:
+            second["secondpass-read-ok"] = second.get("secondpass-read-ok", 0) + 1
+            print("no-scale: {}（引擎读得通，量尺进不去，这一格不与任何尺子比）".format(p.name))
+            sys.stdout.flush()
+            continue
+        bucket, problems = read_refusal(err or "", p.read_bytes())
+        if bucket:
+            key = "secondpass-" + bucket
+            second[key] = second.get(key, 0) + 1
+            second["secondpass-designed"] = second.get("secondpass-designed", 0) + 1
+            print("{}: {}（第二趟，{}）".format(bucket, p.name, kind))
+        elif problems:
+            triage.append((p, ["（第二趟，量尺进不去）" + problems[0]]))
+            second["secondpass-triage"] = second.get("secondpass-triage", 0) + 1
+            print("triage: {}（第二趟） ← {}".format(p.name, problems[0]))
+        else:
+            triage.append(
+                (p, ["（第二趟，量尺进不去）读侧失败，且没有任何一句形状能被字节复核: " + text[:160]])
+            )
+            second["secondpass-triage"] = second.get("secondpass-triage", 0) + 1
+            print("triage: {}（第二趟）".format(p.name))
+        sys.stdout.flush()
+    stats.update(second)
+
     print()
-    print("语料：扫到 {} 个图片文件，Pillow 可打开 {} 个，打不开 {} 个".format(
-        len(files), len(usable), len(unreadable)))
+    print(
+        "语料：扫到 {} 个图片文件，Pillow verify 通得过 {} 个，"
+        "其中连像素也解得开的 {} 个（verify 过了却解不开 {} 个，不进分母），"
+        "完全打不开 {} 个".format(
+            len(files),
+            len(usable) + len(undecodable),
+            len(usable),
+            len(undecodable),
+            len(unreadable),
+        )
+    )
     for name in sorted(buckets):
         print("  {:<20} {}".format(name, buckets[name]))
+    refused = stats.get("tiff-refused", 0)
+    print(
+        "拒绝复核：写侧按设计拒绝裸 TIFF {} 个（IFD0 不在偏移 8 的 {} 个{}）；"
+        "读侧复核通过的设计内拒绝：类型 11/12/13 共 {} 个、类型编号不存在 {} 个、"
+        "值指针越出文件之外 {} 个、声明字节放不下 {} 个、容器魔数不对 {} 个".format(
+            refused,
+            stats.get("tiff-refused-late-ifd", 0),
+            ""
+            if not refused
+            else "，写下去会丢的字节最少 {} 、最多 {}".format(
+                stats.get("tiff-drop-min", 0), stats.get("tiff-drop-max", 0)
+            ),
+            stats.get("designed-unsupported-type", 0),
+            stats.get("designed-undefined-type", 0),
+            stats.get("designed-malformed-pointer", 0),
+            stats.get("designed-truncated-value", 0),
+            stats.get("designed-wrong-magic", 0),
+        )
+    )
+    if second:
+        print(
+            "第二趟（量尺进不去的 {} 个，不进分母、不改比例）：读侧拒绝只按这个文件"
+            "自己的字节复核——复核通过的设计内拒绝 {} 个（类型 11/12/13 {}、"
+            "类型编号不存在 {}、值指针越界 {}、声明字节放不下 {}、容器魔数不对 {}），"
+            "引擎读得通而无尺可核 {} 个，复核不上而落进分诊 {} 个".format(
+                len(second_pass),
+                stats.get("secondpass-designed", 0),
+                stats.get("secondpass-designed-unsupported-type", 0),
+                stats.get("secondpass-designed-undefined-type", 0),
+                stats.get("secondpass-designed-malformed-pointer", 0),
+                stats.get("secondpass-designed-truncated-value", 0),
+                stats.get("secondpass-designed-wrong-magic", 0),
+                stats.get("secondpass-read-ok", 0),
+                stats.get("secondpass-triage", 0),
+            )
+        )
     print(
         "XMP 闸：语料里带包 {} 个，产物复查 {} 个，摘除并披露 {} 个".format(
             stats.get("xmp_src", 0),

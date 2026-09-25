@@ -65,9 +65,7 @@ pub impl Show for MetaError with fn output(self : MetaError, logger) {
         "byte-order mark at offset \{off} is neither 'II' nor 'MM'",
       )
     IfdOffsetOutOfRange(off) =>
-      logger.write_string(
-        "IFD offset \{off} points outside the block or is misaligned",
-      )
+      logger.write_string("IFD offset \{off} points outside the block")
     EntryTooLarge(off, tag, declared, available) =>
       logger.write_string(
         "tag \{tag_hex(tag)} at offset \{off} declares \{declared} byte(s), only \{available} left",
