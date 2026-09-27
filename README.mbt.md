@@ -759,7 +759,9 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   **两路**都红，N2（搬完又从新表尾开始清零）红在库测试，N3–N5 分别打门禁的独立
   实现、链那一闸、自测夹具。本轮实测 `期望表态 9 处，抓到 9 处`，每处 `finally`
   按字节还原、跑完 sha 复算一致（`inplace_crosscheck.py=13d0f7e76d27`、
-  `moonmeta_tiff_patch.mbt=c313e1b6706e`）。N6 那一路缺 moon 或缺外来裸 TIFF 语料时
+  `moonmeta_tiff_patch.mbt=618020547249`；这两个值是这一回合从盘上重新量的——
+  上一版这里写的是 `c313e1b6706e`，那是 IPTC 那一笔改动之前的文件，
+  引用文件指纹就得连自己后来的改动一起算）。N6 那一路缺 moon 或缺外来裸 TIFF 语料时
   是停下出声，不是跳过：只有门禁自测那三格能红的话，剩下的"红"全指向我手打的字节。
   `cli` 作业那一整条链子这一轮不再是"我按顺序手跑了一遍"，而是有一个机械复放器：
   `python ci/replay_cli.py --moon D:/moonbit/bin/moon.exe` 直接从
