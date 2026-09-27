@@ -329,7 +329,7 @@ GPS/GPSLongitude → location
 | `MakerNote` | 厂商私有块（内容不受规范约束，坐标常藏在里面） | ✔ | ✔ |
 | `Comments` | `UserComment` | ✔ | ✔ |
 | `Timestamps` | `DateTime` 及各 `OffsetTime*` / `SubsecTime*` / `DateTime*` | ✘ | ✔ |
-| `Carrier` | 容器里成包的第二份副本：JPEG 的 XMP APP1 与 APP13（`Photoshop 3.0` 资源包，IPTC-IIM 住在里面）、PNG 里关键字为 `XML:com.adobe.xmp` 的 `tEXt`/`iTXt`，以及 TIFF 里装整包的 `0x02bc` / `0x02bd` / `0x8773` | ✔ | ✔ |
+| `Carrier` | 容器里成包的第二份副本：JPEG 的 XMP APP1 与 APP13（`Photoshop 3.0` 资源包，IPTC-IIM 住在里面）、PNG 里关键字为 `XML:com.adobe.xmp` 的 `tEXt`/`iTXt`，以及 TIFF 里装整包的 `0x02bc` / `0x02bd` / `0x83bb` | ✔ | ✔ |
 
 `Carrier` 和上面六类不是同一种东西：其余六类删的是 IFD 里的一条条目，
 它删的是另一整套元数据。这一类是被真实语料逼出来的——逐条策略删干净之后，
@@ -354,8 +354,8 @@ GPS/GPSLongitude → location
 
 分类明细住在 `moonmeta_tags.mbt` 的 `sensitive_tags` 表里：17 行
 （每个编号都对着 exiftool 的 tag 名表核过）+ "GPS 目录整体算 `Location`"
-一条规则。报告上能打名字是因为 64 个编号有规范名（IFD0 14 个、Exif 14 个、
-GPS 32 个、Interop 4 个），这 64 行逐条钉在 `moonmeta_tags_test.mbt` 里；表外的编号
+一条规则。报告上能打名字是因为 65 个编号有规范名（IFD0 15 个、Exif 14 个、
+GPS 32 个、Interop 4 个），这 65 行逐条钉在 `moonmeta_tags_test.mbt` 里；表外的编号
 回吐十六进制，不拿别的目录的名字凑。`Copyright` 刻意不在任何类别里——
 它是权利声明，抹掉它本身就是一种伤害。
 
@@ -411,7 +411,8 @@ GPS 32 个、Interop 4 个），这 64 行逐条钉在 `moonmeta_tags_test.mbt` 
   类型 11/12/13 停下），实测那种文件 `redact` 与 `strip` 都是退出码 1 加一句带数字
   的拒绝（IFD0 在哪、会丢多少字节），且不落任何产物——宁可不动，也不写一个
   不能证明逐字节等价的产物。**这一轮给它加了一条出路**：`--keep-bytes` 走原位
-  （只改目录表那一段，长度不变），同一批 104 份上 strict 腿写出 19 份产物、
+  （只改目录表那一段，长度不变），同一批 104 份上 strict 腿写出 15 份产物、68 份
+  无事可做（D15 之前是 19 / 63，差的四份见下面 D15 那一段）、
   strip 腿 49 份，每份由 `ci/inplace_crosscheck.py` 反着核过；它的代价与边界写在
   上面那一节（不碰像素、也不碰缩略图目录链）。至于"带像素的整份重产出"，
   完整支持它要在重写时重算 `StripOffsets` / `TileOffsets` / 缩略图指针这一组
@@ -436,7 +437,7 @@ moon test --target js
 moon test --target wasm-gc
 ```
 
-162 个用例。三个后端各跑一遍，2026-09-27 实测都是 `Total tests: 162, passed: 162,
+163 个用例。三个后端各跑一遍，2026-09-27 实测都是 `Total tests: 163, passed: 163,
 failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
 
 - **不自己给自己打分。** `ci/make_fixture.py` 用 Pillow 造 JPEG / PNG 测试
@@ -567,7 +568,7 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   这句话打印出来并返回 1（"strip 这一关一个文件都没跑到"）——全绿不等于测过。
   这一批的 IPTC 闸同样是"要求它恒为 0"那一半：带包 0 / 摘除并披露 0 / 缺省档 0，
   `unread` 点出 0 段，而 `iptc` 键在进分母的 86 个文件上都与原文件字节核过。
-  裸 TIFF 上 IPTC 不住在"成包"里，而是 IFD0 的一条（`IptcNaa` 0x8773、
+  裸 TIFF 上 IPTC 不住在"成包"里，而是 IFD0 的一条（`IptcNaa` 0x83bb、
   `PhotoshopSettings` 0x02bd——逐条清单本来就看得见它们），所以这一位在裸 TIFF 上
   按设计恒为 false，报 true 就是无中生有：这一格钉的正是"不许说在有"。
   跟着第三批补上的是脚本口径的一次升级：库里每一句"这一步我不做"都带着数字
@@ -647,7 +648,7 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   一直在 `.gitignore` 的 `.scratch/` 里，也就是说文档里那句"证据在这儿"在克隆
   出来之后是断的（比 untracked 更静默——`git ls-files .scratch` 是 0 个文件）。
   五个驱动（`mut_d7` / `mut_d8` / `mut_explain` / `mut_d11b` / `mut_d12`）现在
-  都在 `ci/mutations/` 下（那是搬家当天的名单，今天这个目录里有八个驱动，
+  都在 `ci/mutations/` 下（那是搬家当天的名单，今天这个目录里有九个驱动，
   下文收尾判定那一段说的是全集），跑法仍然是在仓库根目录 `python ci/mutations/<名字>.py`。
   搬家当天就抓到一次真错：那两个语料级驱动用 `parents[1]` 反推仓库根，从
   `.scratch/` 挪到 `ci/mutations/` 之后深度多了一层，它们把 `.scratch` 找成了
@@ -667,13 +668,17 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   那几行自己的收尾语，外加两组必须相等的计数（`期望表态 N 处 / 抓到 M 处`、
   `开跑前锚点清点 A/B`）。判定器自己有一张真值表（`--selftest`：纯函数、
   不起子进程、不需要语料，变异行一律喂 rc=0，否则"红"是退码给的不是被测那道闸给的），
-  今天实测 `判定器真值表：25 格，错 0 格`。它的形状是：每个驱动两格打底（正例判绿、
+  今天实测 `判定器真值表：30 格，错 0 格`。它的形状是：每个驱动两格打底（正例判绿、
   注入出来的红句必须翻红），再加几格专钉判定器自己的松紧——把"抓到 M 处"比
   "期望表态 N 处"少一格的输出喂进来必须判红（`mut_d7` 这一轮正是把收尾语从硬写的
   "五处"换成派生数字，没有这条负例，放宽正则就等于放宽判定），退码非 0 而收尾语
   说绿的也必须判红；最后一格钉 CI 名单：
-  `SPECS` 里声明的驱动与 `NEEDS_CORPUS` 里表态的驱动做**双向**差集（今天 8 对 8，
-  两个方向都为空才算过），少一边就是"新驱动悄悄不进 CI"。真值表那一格进了 CI 的
+  `SPECS` 里声明的驱动与 `NEEDS_CORPUS` 里表态的驱动做**双向**差集（今天 9 对 9，
+  两个方向都为空才算过），少一边就是"新驱动悄悄不进 CI"。这一格今天加硬过一刀：
+  双向差集只证明两份名单对齐，不证明新驱动真被判定器验过，所以正例那半边改成
+  只认从盘上真日志抄进来的收尾语——把 `mut_d15` 那一行正例删掉再跑 `--selftest`，
+  它现在打的是 `FAIL … 缺正例：mut_d15.py` 并退 1（第一版只数名字集合，删了照过，
+  也就是"少一层验证"这件事本身不咬）。真值表那一格进了 CI 的
   命令行作业；另有 `--report <目录>` 只判定盘上已有的日志、不起子进程。
   2026-09-27 上午的全量复跑实测：七个驱动 `7/7 GREEN`（当时 `mut_d7` 五处、
   `mut_d8` 六处、`mut_d10` 9/9、`mut_d11b` 5/5、`mut_d12` 10/10、`mut_d13` 5/5、
@@ -690,8 +695,37 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   然后在干净工作树上把整批重跑了一遍收口：`8 个驱动里绿 8 个（期望 8）`，
   跑完 `git status --porcelain` 为空。`ci.yml` 里那一步用的命令本机也原样跑过
   （`python ci/mutations/run_all.py --ci`）：`5 个语料无关的驱动里绿 5 个`、rc=0
-  ——那五个是 CI 上没有外来语料也能实跑的，也就是说 CI 上这一关不是空过：
+  ——那几个是 CI 上没有外来语料也能实跑的，也就是说 CI 上这一关不是空过：
   `mut_d9e` 那十六处注入就在里面。
+  **D15 是这一层的第二次用处，也是它第一次抓到一个"所有闸都看不见"的错位**：
+  `sensitive_tags` 与规范名表把 IPTC-NAA 的编号写成了 `0x8773`，而 `0x8773` 是
+  ICC 色彩配置文件（`InterColorProfile`），真 IPTC-NAA 是 `0x83bb`。两头同时错：
+  那批外来裸 TIFF 里带 `0x8773` 的有 14 份（按 TIFF 6.0 走一遍 IFD0 普查出来的份数），
+  其中 9 份走得进条目层——旧表那一行 `(Ifd0, 0x8773, Carrier)` 就落在这 9 份上，而唯一一份真 IPTC
+  （`hopper.Lab.tif` 的 `0x83bb`，type 7、count 15）一条都不报。逐份实跑的是修后的
+  口径：`audit --policy strict` 现在在这 9 份上报出的清单
+  里没有一条 `0x8773`（命中只剩 `DateTime` / `XMP`），另外 5 份是 Pillow 的 `crash-*`
+  回归件，读取侧按设计先停下，实测第一份是 `tag 0xa480 points to offset 4048,
+  outside the block`；修后 `hopper.Lab.tif` 报出 3 条（`DateTime` / `XMP` / `IptcNaa`）。
+  这错位唯一一次落到字节上是在原位那条腿：同一批 104 份今天重跑，strict 腿从 19 份产物
+  变成 15 份，逐份比输入字节找出差的那四份——`hopper.iccprofile.tif`、
+  `hopper.iccprofile_binary.tif`、`pport_g4.tif`、`tiff_tiled_ycbcr_jpeg_1x1_sampling.tif`，
+  它们在 `strict` 下唯一的收获就是那份 ICC，修后统统变成"无事可做、原样交回"；
+  另有一份（`tiff_strip_ycbcr_jpeg_1x1_sampling.tif`）从"设计内拒绝"挪进"无事可做"，
+  因为不再有要动的条目。所以"会改坏颜色"不是文案层的比喻：那四份文件的目录表真的被
+  清过一遍。
+  这一类错位对当时每一道闸都是隐身的：原位门禁那份"该删哪些"直接取自
+  `audit --json`（它自己独立算的是目录图与落笔区间），逐条名字表又只跟库自己比——
+  拿被检方自己的清单检被检方，等于没检。所以补的不是又一层文本闸，而是两条
+  由规范编号与文件字节说话、方向相反的断言：`moonmeta_tags_test.mbt` 里
+  `0x83bb → Carrier` 与 `0x8773 → 不属于任何类别` 一删一留成对，
+  `moonmeta_redact_test.mbt` 里"TIFF 里的 IPTC 要摘掉，ICC 要原样留下"端到端比字节。
+  新驱动 `ci/mutations/mut_d15.py` 钉这两道闸真的会咬：三格注入（类别表退回
+  `0x8773` / 两条都留在表里 / 名字表退回），实测 `期望表态 7 处，抓到 7 处`、
+  锚点 `3/3 唯一在位`、还原 sha 对账一致；中间那一格是区分度——两条都留在表里时
+  "七个类别"那条断言必须仍然绿，否则三格会红成同一句话。当天干净工作树上的收口：
+  `9 个驱动里绿 9 个（期望 9）`、跑完 `git status --porcelain` 为空，
+  `run_all.py --ci` 那一路 `6 个语料无关的驱动里绿 6 个`，三个后端各 `163/163`。
   对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 141 个用例（实测
   `Ran 141 tests`、`OK`、rc=0；两轮前是 45 个，那一轮加的 40 个全部钉当时的
   "数字复核"：条目走查算出的
@@ -825,7 +859,7 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   断言，一个后端过、另一个不过，说明代码里混进了只在某个运行时装得起来的
   行为。
 - 覆盖率：`moon test --enable-coverage && moon coverage analyze -- -f summary`
-  → 1558/1798 行（86.7%，同一条命令实测 `Total tests: 162, passed: 162, failed: 0`）。
+  → 1559/1799 行（86.7%，同一条命令实测 `Total tests: 163, passed: 163, failed: 0`）。
   未覆盖的 240 行里有 176 行在 `cmd/main/main.mbt`（260/436），
   没覆盖的几乎全是真正读写文件的几行：`x/fs` 在非 native 后端没有文件系统，
   而包的测试要在三个后端都跑绿，所以判断逻辑（路径拼装、覆盖拒绝、策略解析、
