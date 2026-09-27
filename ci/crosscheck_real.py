@@ -8,10 +8,16 @@
    两个方向都比（我们漏了 / 我们凭空报了）。
 2. **删得干净不干净**——按策略脱敏之后，用 Pillow 复查：点名的条目读不到了、
    没点名的还在、像素没动、输入文件逐字节没动。
-3. **整包 XMP 有没有被绕开**——脱敏产物里不许再搜到 XMP 包标记，也不许搜到
-   包里的敏感键；摘除了就必须由 CLI 说出来。这一条是上一轮跑批抓出来的真漏
-   （82 个产物里 13 个还带着完整的第二份元数据），所以它长在这里，
+3. **整包载体有没有被绕开**——脱敏产物里不许再搜到 XMP 包标记（标准包与分块
+   扩展包两种），也不许搜到包里的敏感键；JPEG 的 APP13 里那包 Photoshop 资源
+   （IPTC-IIM 住在里面）同一条判据，只是它没有敏感键名单可查（IIM 是二进制的，
+   按字节搜不到字段名）。摘除了就必须由 CLI 说出来。这一条是上一轮跑批抓出来的
+   真漏（82 个产物里 13 个还带着完整的第二份元数据），所以它长在这里，
    不长在 .scratch 的一次性脚本里。
+3b. **认不出的段不许混进"认得出"那一栏**——`read --json` 的 `iptc` 与 `unread`
+   两个键逐文件与这个文件自己的字节对拍：`iptc` 说在有两条都要红，
+   `unread` 里每一段的名字要能在它报出的偏移上找到对应段码（载荷还不许
+   以"要认出来的头"开头——那说明同一份字节被报了两遍）。
 4. **两档策略都跑**——写侧不只验 strict，也验 CLI 的缺省档 privacy：
    用户不打 `--policy` 时拿到的就是它，而它先前一条真实语料证据都没有。
    privacy 的期望不另抄一份敏感表，从同一个文件的 strict findings 按
@@ -111,8 +117,13 @@ THUMB_POINTER_TAGS = (0x0201, 0x0202)
 THUMB_DISCLOSED = "丢掉可能自带坐标的缩略图"
 
 # 容器里 XMP 包的字节标记。裸 TIFF 也用它：0x02bc 那条的载荷就是同一个 URI 开头。
+#
+# 两个 URI 只差最后一段：`.../xap/1.0/` 是标准包，`.../xmp/extension/` 是
+# Photoshop 装不下时用的分块扩展包。只列前一个的话，语料里那一号"只有扩展包"的
+# 文件会被判成"CLI 说在有、字节里却搜不到"——那是闸的假红，不是库的假报。
 XMP_MARKS = (
     b"http://ns.adobe.com/xap/1.0/",
+    b"http://ns.adobe.com/xmp/extension/",
     b"XML:com.adobe.xmp",
     b"<x:xmpmeta",
 )
@@ -138,6 +149,13 @@ XMP_SENSITIVE = (
     b"Iptc4xmpCore:Location",
     b"MP:RegionInfo",  # 微软 XMP 里的人脸区域
 )
+
+# JPEG 的 APP13 里 Photoshop 资源块的头（含结尾那个 NUL）。
+# IPTC-IIM（署名、版权、联系人）住在这个包里，和 IFD0 的 0x83bb 是同一类东西。
+# 这一路没有对应的"敏感键"名单：IIM 记录是二进制的（0x02,80 才是 Byline），
+# 按字节搜搜不到字段名，只能搜到值——而值可以是任何文本。所以判据只有一条：
+# 整包在不在。留着整包比"读得出里面几条"更糟，我们本来也就是整包摘除它。
+IPTC_HEAD = b"Photoshop 3.0\x00"
 
 # 读侧的"这一步我不做"不能按变体名匹配。CLI 打出来的是 `Show` 的措辞，
 # 那句话里从来没有 `UnsupportedType` 这样的名字——旧的那份名单（八个变体名）
@@ -886,11 +904,40 @@ def xmp_residue(
     return out
 
 
+def iptc_residue(
+    dst,
+    src_blob,
+    red_out,
+    stats,
+    policy="strict",
+    dropped_key="iptc_dropped",
+):
+    """产物字节里的 Photoshop 资源包残留，加上"摘了有没有说"。
+
+    与 `xmp_residue` 同一条判据，但不共用函数：这一路没有敏感键名单（IIM 是
+    二进制的，搜不到字段名），而且 `redacted` 那个分母已经由 XMP 那一趟加过了
+    ——同一个文件在两趟里各加一次，"产物复查 N 个"就成了一句没有分母的话。
+    """
+    out = []
+    blob = dst.read_bytes()
+    if IPTC_HEAD in blob:
+        out.append("{} 之后产物里还有 IPTC/Photoshop 包".format(policy))
+    elif IPTC_HEAD in src_blob:
+        if "IPTC" not in red_out:
+            out.append("{}：整包 IPTC 已被摘除，但 CLI 没有披露".format(policy))
+        else:
+            stats[dropped_key] = stats.get(dropped_key, 0) + 1
+    return out
+
+
 # `read --json` 的 `xmp` 键是一个文件"有没有整包元数据"的唯一机读说法。
 # 它必须能用这个文件自己的字节复核，两个方向都要红：说有而字节里没有是假警报，
 # 字节里有却说没有，就是当初那 13 个产物泄漏的同一件事。
 PACKET_MARKS = {
-    "jpeg": (b"http://ns.adobe.com/xap/1.0/",),
+    "jpeg": (
+        b"http://ns.adobe.com/xap/1.0/",
+        b"http://ns.adobe.com/xmp/extension/",
+    ),
     "png": (b"XML:com.adobe.xmp",),
 }
 
@@ -909,6 +956,123 @@ def xmp_flag_problems(kind, blob, flag):
     if seen and not flag:
         return ["说在无：原始字节里搜得到包标记，xmp 却是 false（走查漏了一包）"]
     return []
+
+
+# `iptc` 与 `unread` 是同一趟走查打出来的另外两位。它们各自管一种漏法：
+# `iptc` 管"认得出的整包有没有报出来"，`unread` 管"认不出的段有没有说清在哪"。
+# 只认得 XMP 那一档的话，一个装着 IPTC 与注释段的文件会读成"什么都没有了"。
+IPTC_PACKET_MARKS = {
+    "jpeg": (IPTC_HEAD,),
+}
+
+# 这四份头是走查"认出来了"的代号：认出来的那段就不会同时挂在 unread 里。
+# 两处若同时出现，说明同一份字节被报了两遍——那是两套分类在互相打架。
+NAMED_HEADS = (
+    b"Exif\x00\x00",
+    b"http://ns.adobe.com/xap/1.0/",
+    b"http://ns.adobe.com/xmp/extension/",
+    IPTC_HEAD,
+)
+
+
+def iptc_flag_problems(kind, blob, flag):
+    """`iptc` 键与这个文件原始字节的不一致清单（空 = 一致）。"""
+    marks = IPTC_PACKET_MARKS.get(kind)
+    if flag is None:
+        return ["read --json 少了 iptc 键"]
+    if marks is None:
+        # PNG 与裸 TIFF 的 IPTC 不住在"成包"里：前者在没解析的文本块里（走 unread
+        # 那一栏），后者是 IFD0 的一条（逐条清单本来就看得见）。
+        # 所以这一位在这两种容器上必须恒为 false，报 true 就是无中生有。
+        if flag:
+            return ["说在有：{} 容器没有成包的 IPTC，iptc 却是 true".format(kind)]
+        return []
+    seen = any(m in blob for m in marks)
+    if flag and not seen:
+        return ["说在有：iptc=true，原始字节里却搜不到 Photoshop 资源包头"]
+    if seen and not flag:
+        return ["说在无：原始字节里搜得到 Photoshop 资源包头，iptc 却是 false"]
+    return []
+
+
+def _jpeg_segment_head(blob, offset):
+    """从段首偏移走到载荷起点，跳过 0xff 填充。段首不是 0xff 时回 None。"""
+    if offset < 0 or offset >= len(blob) or blob[offset] != 0xFF:
+        return None
+    k = offset + 1
+    while k < len(blob) and blob[k] == 0xFF:
+        k += 1
+    if k >= len(blob):
+        return None
+    return k, blob[k : k + 1]
+
+
+def unread_problems(kind, blob, unread):
+    """`unread` 里每一段都要能在这一号文件自己的字节上站得住。"""
+    if unread is None:
+        return ["read --json 少了 unread 键"]
+    if kind not in ("jpeg", "png"):
+        # 裸 TIFF 没有段表：那一栏在 TIFF 上永远是空的，有内容就是错
+        return (
+            [] if not unread else ["tiff 容器不该报出未解析段：{}".format(unread)]
+        )
+    out = []
+    for item in unread:
+        problem = _unread_item(kind, blob, item)
+        if problem:
+            out.append(problem)
+    return out
+
+
+def _unread_item(kind, blob, item):
+    name, sep, raw = str(item).rpartition("@")
+    if not sep or not raw.isdigit():
+        return "未解析段的名字读不出偏移: {}".format(item)
+    offset = int(raw)
+    if kind == "png":
+        # 块的偏移指着长度域，块类型在它后面那四个字节上。
+        # 编码用 latin-1：库里的块名是"每字节一个字符"拼出来的，
+        # 非 ASCII 的块类型（坏文件才有）走 JSON 的 \uXXXX 转义回来，正好一一对上。
+        head = blob[offset + 4 : offset + 8]
+        if head != name.encode("latin-1", "replace"):
+            return "未解析块 {} 的偏移上没有这个类型（实为 {!r}）".format(
+                item, head
+            )
+        return ""
+    parsed = _jpeg_segment_head(blob, offset)
+    if parsed is None:
+        return "未解析段 {} 的偏移上不是段首 0xff".format(item)
+    k, marker = parsed
+    want = _jpeg_marker_byte(name)
+    if want is None:
+        return "未解析段的名字不认识: {}".format(item)
+    if marker != bytes([want]):
+        return "未解析段 {} 标的是 {}，段码却是 {!r}".format(
+            item, name, marker.hex()
+        )
+    payload = blob[k + 3 : k + 3 + 34]
+    for head in NAMED_HEADS:
+        if payload.startswith(head):
+            return (
+                "同一份字节报了两遍：{} 的载荷以 {} 开头，那是要认出来的头".format(
+                    item, head.decode("ascii", "replace")
+                )
+            )
+    return ""
+
+
+def _jpeg_marker_byte(name):
+    if name.startswith("APP") and name[3:].isdigit():
+        n = int(name[3:])
+        return 0xE0 + n if n <= 15 else None
+    if name == "COM":
+        return 0xFE
+    if name.startswith("0x") and len(name) == 4:
+        try:
+            return int(name, 16)
+        except ValueError:
+            return None
+    return None
 
 
 # Pillow 的 get_ifd(0x8825) 只从 IFD0 取 GPSInfo 指针；而 Pillow 自己的写出器
@@ -1048,16 +1212,21 @@ def privacy_expectations(findings, their, after, explained):
 # 改措辞会先红在 `moon test` 里，而不是红在这次的跑批里。
 STRIP_AFFIRM = "元数据已整段摘除："
 
+# strip 点名 IPTC 包时用的那三个字。同样是 CLI 自己的测试钉着的整句片段；
+# 写成变量而不是散在判据里，是为了让"措辞改了、闸跟着改"这件事发生在一处。
+IPTC_LISTED = "IPTC/Photoshop 包"
 
-def strip_claims(output, had_exif, had_xmp):
+
+def strip_claims(output, had_exif, had_xmp, had_iptc=False):
     """CLI 那句话与这个文件的事实之间的差集（空 = 说得对）。
 
-    先把"元数据已整段摘除：EXIF,XMP 包。"里点名的载体拆成一个集合再比。
-    不能只做 `"EXIF" in output` 这种子串判断——否定那句"这个文件本来就没有
-    EXIF，也没有 XMP 包"里同样写着 EXIF 和 XMP，子串会把一条谎说成实话。
+    先把"元数据已整段摘除：EXIF,XMP 包,IPTC/Photoshop 包。"里点名的载体拆成一个
+    集合再比。不能只做 `"EXIF" in output` 这种子串判断——否定那句"这个文件本来
+    就没有 EXIF，也没有 XMP 包与 IPTC 包"里同样写着 EXIF、XMP 和 IPTC，
+    子串会把一条谎说成实话。
 
-    事实只取两处：`had_exif` 是这个文件自己 `read --json` 的 `exif` 位，
-    `had_xmp` 是它的原始字节里有没有包标记。刻意不拿 Pillow 的读数当
+    事实只取三处：`had_exif` 是这个文件自己 `read --json` 的 `exif` 位，
+    `had_xmp` / `had_iptc` 是它的原始字节里有没有对应包头。刻意不拿 Pillow 的读数当
     "有没有 EXIF"的依据——Pillow 会把 XMP 包里的值注进 `getexif()`，
     一个只有 XMP 的 PNG 会被判成"有 EXIF"，闸就会在一个合法的说法上报红。
     """
@@ -1069,10 +1238,14 @@ def strip_claims(output, had_exif, had_xmp):
         out.append("源文件有 EXIF 段，strip 却没有交代摘除它")
     if had_xmp and "XMP 包" not in listed:
         out.append("源文件带着 XMP 包，strip 却没有交代摘除它")
-    if (had_exif or had_xmp) and said_absent:
+    if had_iptc and IPTC_LISTED not in listed:
+        out.append("源文件带着 IPTC/Photoshop 包，strip 却没有交代摘除它")
+    if (had_exif or had_xmp or had_iptc) and said_absent:
         out.append("源文件有元数据，strip 却说这个文件本来就没有")
-    if not (had_exif or had_xmp) and not said_absent:
-        out.append("源文件 EXIF 与 XMP 两样都没有，strip 却说摘除了东西")
+    if not (had_exif or had_xmp or had_iptc) and not said_absent:
+        out.append(
+            "源文件 EXIF、XMP 包、IPTC 包三样都没有，strip 却说摘除了东西"
+        )
     return out
 
 
@@ -1085,6 +1258,7 @@ def strip_step(moon, repo, src, out_dir, stats, doc, src_blob, pixels_before):
     """
     s_dst = out_dir / (src.stem + ".stripped" + src.suffix)
     had_xmp = any(m in src_blob for m in XMP_MARKS)
+    had_iptc = IPTC_HEAD in src_blob
     before_input = sha256(src)
     code, out = run_moon(moon, ["strip", str(src), "-o", str(s_dst)], repo)
     if code != 0:
@@ -1100,8 +1274,10 @@ def strip_step(moon, repo, src, out_dir, stats, doc, src_blob, pixels_before):
     stats["stripped"] = stats.get("stripped", 0) + 1
     if had_xmp:
         stats["strip_xmp"] = stats.get("strip_xmp", 0) + 1
+    if had_iptc:
+        stats["strip_iptc"] = stats.get("strip_iptc", 0) + 1
 
-    notes = strip_claims(out, bool(doc["exif"]), had_xmp)
+    notes = strip_claims(out, bool(doc["exif"]), had_xmp, had_iptc)
 
     s_doc, s_err = read_json(moon, repo, s_dst)
     if s_doc is None:
@@ -1111,6 +1287,17 @@ def strip_step(moon, repo, src, out_dir, stats, doc, src_blob, pixels_before):
             notes.append("strip 之后 read 还报得出 EXIF")
         if s_doc.get("xmp") is True:
             notes.append("strip 之后 read 还报得出 XMP 包")
+        if s_doc.get("iptc") is True:
+            notes.append("strip 之后 read 还报得出 IPTC 包")
+        # 认不出的段是"我们不动它"那一类：strip 之后它们当然还在，
+        # 但产物自己的走查必须还报得出来——漏了就是走查在产物上失灵。
+        notes.extend(
+            unread_problems(
+                s_doc.get("container"),
+                s_dst.read_bytes(),
+                s_doc.get("unread"),
+            )
+        )
 
     try:
         left = pillow_dirs(s_dst)
@@ -1129,6 +1316,8 @@ def strip_step(moon, repo, src, out_dir, stats, doc, src_blob, pixels_before):
     keys = [k.decode() for k in XMP_SENSITIVE if k in blob]
     if keys:
         notes.append("strip 之后产物字节里还搜得到敏感键: {}".format(keys))
+    if had_iptc and IPTC_HEAD in blob:
+        notes.append("strip 之后产物里还有 IPTC/Photoshop 包")
 
     if sha256(src) != before_input:
         notes.append("strip 改动了输入文件本身")
@@ -1147,6 +1336,8 @@ def check_one(moon, repo, src, out_dir, stats):
     src_blob = src.read_bytes()
     if any(m in src_blob for m in XMP_MARKS):
         stats["xmp_src"] = stats.get("xmp_src", 0) + 1
+    if IPTC_HEAD in src_blob:
+        stats["iptc_src"] = stats.get("iptc_src", 0) + 1
     doc, err = read_json(moon, repo, src)
     if doc is None:
         text = err or ""
@@ -1166,7 +1357,7 @@ def check_one(moon, repo, src, out_dir, stats):
 
     bucket = "ok"
 
-    # 0) 机读那一位的 `xmp` 键，先跟这个文件的字节对一遍
+    # 0) 机读那一位的 `xmp`/`iptc`/`unread` 三个键，先跟这个文件的字节对一遍
     if doc.get("container") in PACKET_MARKS:
         stats["xmp_flag"] = stats.get("xmp_flag", 0) + 1
         flag_problems = xmp_flag_problems(
@@ -1175,6 +1366,22 @@ def check_one(moon, repo, src, out_dir, stats):
         if flag_problems:
             notes.extend(flag_problems)
             bucket = "triage"
+    # iptc / unread 两个键在所有容器上都必须存在（TIFF 与 PNG 报 false 与空表），
+    # 所以这里不加分支条件：加了就等于"键没了"这一格永远看不见。
+    stats["iptc_flag"] = stats.get("iptc_flag", 0) + 1
+    flag_problems = iptc_flag_problems(
+        doc["container"], src_blob, doc.get("iptc")
+    )
+    if flag_problems:
+        notes.extend(flag_problems)
+        bucket = "triage"
+    problems = unread_problems(doc["container"], src_blob, doc.get("unread"))
+    if problems:
+        notes.extend(problems)
+        bucket = "triage"
+    stats["unread_seg"] = stats.get("unread_seg", 0) + len(
+        doc.get("unread") or []
+    )
 
     # 1) 有没有 EXIF 这件事，两边得一致
     if bool(their["IFD0"]) != doc["exif"] and not any(their.values()):
@@ -1335,6 +1542,11 @@ def check_one(moon, repo, src, out_dir, stats):
             notes.append(note)
             bucket = "triage"
 
+        # 4b) 同一件事的第二个包：APP13 里的 Photoshop 资源包（IPTC-IIM）。
+        for note in iptc_residue(dst, src_blob, red_out, stats):
+            notes.append(note)
+            bucket = "triage"
+
         kept_before = {
             (name, t)
             for name in DIRS
@@ -1445,6 +1657,17 @@ def check_one(moon, repo, src, out_dir, stats):
                 notes.append(note)
                 bucket = "triage"
 
+            for note in iptc_residue(
+                p_dst,
+                src_blob,
+                p_out,
+                stats,
+                policy="privacy",
+                dropped_key="iptc_dropped_privacy",
+            ):
+                notes.append(note)
+                bucket = "triage"
+
             if sha256(src) != before_input_p:
                 bucket = "triage"
                 notes.append("privacy 改动了输入文件本身")
@@ -1465,9 +1688,19 @@ def check_one(moon, repo, src, out_dir, stats):
             notes.append(note)
             bucket = "triage"
     else:
-        # 没有 EXIF 不等于没有元数据：整包 XMP 可以单独存在，
+        # 没有 EXIF 不等于没有元数据：整包 XMP 或整包 IPTC 可以单独存在，
         # 而那种文件的逐条清单天然是空的。不单独跑这一趟，闸就永远绿。
-        if any(m in src_blob for m in XMP_MARKS):
+        if any(m in src_blob for m in XMP_MARKS) or IPTC_HEAD in src_blob:
+            packets = "+".join(
+                [
+                    name
+                    for name, hit in (
+                        ("XMP", any(m in src_blob for m in XMP_MARKS)),
+                        ("IPTC", IPTC_HEAD in src_blob),
+                    )
+                    if hit
+                ]
+            )
             dst = out_dir / (src.stem + ".redacted" + src.suffix)
             before_input = sha256(src)
             try:
@@ -1483,12 +1716,15 @@ def check_one(moon, repo, src, out_dir, stats):
                 if "refusing to rewrite this bare TIFF" not in red_out:
                     bucket = "triage"
                     notes.append(
-                        "只有 XMP 的文件 redact 退出码 {}: {}".format(
-                            code, red_out.strip()[:160]
+                        "只有整包 {} 的文件 redact 退出码 {}: {}".format(
+                            packets, code, red_out.strip()[:160]
                         )
                     )
             else:
                 for note in xmp_residue(dst, src_blob, red_out, stats):
+                    notes.append(note)
+                    bucket = "triage"
+                for note in iptc_residue(dst, src_blob, red_out, stats):
                     notes.append(note)
                     bucket = "triage"
                 if sha256(src) != before_input:
@@ -1516,8 +1752,8 @@ def check_one(moon, repo, src, out_dir, stats):
                 if p_code != 0:
                     bucket = "triage"
                     notes.append(
-                        "privacy 在只有 XMP 的文件上退出码 {}: {}".format(
-                            p_code, p_out.strip()[:160]
+                        "privacy 在只有整包 {} 的文件上退出码 {}: {}".format(
+                            packets, p_code, p_out.strip()[:160]
                         )
                     )
                 else:
@@ -1530,6 +1766,16 @@ def check_one(moon, repo, src, out_dir, stats):
                         policy="privacy",
                         redacted_key="redacted_privacy",
                         dropped_key="xmp_dropped_privacy",
+                    ):
+                        notes.append(note)
+                        bucket = "triage"
+                    for note in iptc_residue(
+                        p_dst,
+                        src_blob,
+                        p_out,
+                        stats,
+                        policy="privacy",
+                        dropped_key="iptc_dropped_privacy",
                     ):
                         notes.append(note)
                         bucket = "triage"
@@ -1746,15 +1992,29 @@ def main():
         )
     )
     print(
-        "整段摘除（strip）：写侧产物 {} 个，其中源文件带着 XMP 包 {} 个"
+        "整段摘除（strip）：写侧产物 {} 个，其中源文件带着 XMP 包 {} 个、"
+        "带着 IPTC 包 {} 个"
         "（分母就是 strict redact 写出产物的文件数：这类文件一个都不许漏跑）".format(
             stats.get("stripped", 0),
             stats.get("strip_xmp", 0),
+            stats.get("strip_iptc", 0),
         )
     )
     print(
-        "xmp 键复核：jpeg/png 共 {} 个，两个方向都跟各自字节比过".format(
-            stats.get("xmp_flag", 0)
+        "IPTC 闸（JPEG 的 APP13）：语料里带包 {} 个，摘除并披露 {} 个，"
+        "默认策略那一趟 {} 个".format(
+            stats.get("iptc_src", 0),
+            stats.get("iptc_dropped", 0),
+            stats.get("iptc_dropped_privacy", 0),
+        )
+    )
+    print(
+        "xmp / iptc 键复核：前者 jpeg/png 共 {} 个，后者全部 {} 个，"
+        "两个方向都跟各自字节比过；未解析段共点出 {} 段，"
+        "每段的名字与偏移都在原文件字节上验过".format(
+            stats.get("xmp_flag", 0),
+            stats.get("iptc_flag", 0),
+            stats.get("unread_seg", 0),
         )
     )
     print(

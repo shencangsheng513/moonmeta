@@ -106,8 +106,8 @@ fn xmp_payload() -> Array[Byte] {
 }
 
 ///|
-/// 签名 + IHDR + [eXIf] + tEXt(XMP) + IDAT + IEND。
-fn png_with(tiff : Bytes?) -> Bytes {
+/// 签名 + IHDR + [eXIf] + tEXt(XMP) + [附加块] + IDAT + IEND。
+fn png_with_extras(tiff : Bytes?, extras : Array[Array[Byte]]) -> Bytes {
   let out : Array[Byte] = [
     b'\x89', b'P', b'N', b'G', b'\x0d', b'\x0a', b'\x1a', b'\x0a',
   ]
@@ -117,9 +117,33 @@ fn png_with(tiff : Bytes?) -> Bytes {
     None => ()
   }
   png_push(out, png_chunk(kind_text(), xmp_payload()))
+  for e in extras {
+    png_push(out, e)
+  }
   png_push(out, png_chunk(kind_idat(), idat_payload()))
   png_push(out, png_chunk(kind_iend(), []))
   Bytes::from_array(out)
+}
+
+///|
+fn png_with(tiff : Bytes?) -> Bytes {
+  png_with_extras(tiff, [])
+}
+
+///|
+/// 一个文本块：关键字 + NUL + 值。真实语料里 `date:create`、`Copyright`
+/// 就是这个形状。
+fn text_block(keyword : String, value : String) -> Array[Byte] {
+  let body = png_ascii(keyword)
+  png_push(body, [b'\x00'])
+  png_push(body, png_ascii(value))
+  png_chunk(kind_text(), body)
+}
+
+///|
+/// 白名单外的参数类块：APNG 的动画控制块，本库既不读也不删。
+fn actl_block() -> Array[Byte] {
+  png_chunk(png_ascii("acTL"), [b'\x00', b'\x00', b'\x00', b'\x03'])
 }
 
 ///|
@@ -181,6 +205,58 @@ test "块表逐块可查，eXIf 载荷正好是那段 TIFF" {
       @test.assert_eq(Bytes::from_array(png_span(file, s, e)), fixture())
     }
   }
+}
+
+///|
+/// 与 JPEG 的 `unread` 同一条判据：白名单只收结构与图像参数，
+/// 白名单外一律逐块点名。`acTL` 是动画控制块、`tEXt(Copyright)` 是人写的文字，
+/// 两者都不在逐条清单里，也就都不许被"已摘除"那句话盖过去。
+test "白名单外的块逐块点名，脱敏不碰它们" {
+  let file = png_with_extras(Some(fixture()), [
+    text_block("Copyright", "2026 shenshi"),
+    actl_block(),
+  ])
+  let map = png_inspect_ok(file)
+  @test.assert_eq(map.unread.map(c => "\{c.kind}@\{c.offset}"), [
+    "tEXt@313", "acTL@347",
+  ])
+  @test.assert_eq(
+    map.describe(),
+    "PNG IHDR@8(13B) eXIf@33(226B) tEXt@271(30B) tEXt@313(22B) acTL@347(4B) IDAT@363(4B) IEND@379(0B) ; 另含 XMP 文本块 ; 未解析块 2 块：tEXt@313 acTL@347",
+  )
+  // 干净夹具（没有附加块）必须是空名单——否则这一栏永远是噪音
+  @test.assert_eq(png_inspect_ok(png_with(Some(fixture()))).unread.length(), 0)
+  // 不解析的东西不许声称删掉了：脱敏之后这两个块要逐字节还在
+  let strict = @moonmeta.strict_policy()
+  let (out, report) = @moonmeta.png_redact(file, strict) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(report.dropped_iptc, false)
+  @test.assert_eq(inspect_contains(out, "Copyright"), true)
+  @test.assert_eq(inspect_contains(out, "acTL"), true)
+  @test.assert_eq(png_inspect_ok(out).unread.map(c => c.kind), ["tEXt", "acTL"])
+  // XMP 那一块是解析过的载体：它该走
+  @test.assert_eq(png_inspect_ok(out).has_xmp, false)
+}
+
+///|
+fn inspect_contains(data : Bytes, needle : String) -> Bool {
+  let all = data.to_array()
+  let pat = png_ascii(needle)
+  let m = pat.length()
+  let mut p = 0
+  let mut found = false
+  while p + m <= all.length() && !found {
+    let mut i = 0
+    while i < m && all[p + i] == pat[i] {
+      i = i + 1
+    }
+    if i == m {
+      found = true
+    }
+    p = p + 1
+  }
+  found
 }
 
 ///|

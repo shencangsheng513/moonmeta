@@ -129,6 +129,13 @@ pub(all) struct Redaction {
   /// XMP 不归 IFD 管，条目清单里根本没有它。
   /// 那个 Bool 同样要区分"丢了"和"本来就没有"。
   dropped_xmp : Bool
+  /// JPEG 的 APP13 里那包 Photoshop 资源（IPTC-IIM 住在里面）有没有被整段摘掉。
+  ///
+  /// 与 `dropped_xmp` 同构、同一条规矩：成包的载体进不了逐条清单，
+  /// 所以"丢了"与"本来就没有"必须由单独的字段交代。
+  /// 裸 TIFF 的 IPTC 是 IFD0 里的一条（`0x83bb`），它本来就在 `removed` 里，
+  /// 所以这一项只对 JPEG 容器为真。
+  dropped_iptc : Bool
 } derive(Debug, Eq)
 
 ///|
@@ -187,7 +194,8 @@ pub fn TiffBlock::redact(
     has_ifd1: false,
   }
   // 裸 TIFF 里 XMP 是 IFD0 的一条（0x02bc），已经被上面的按条过滤处理了；
-  // 这里的 dropped_xmp 只说容器里那种成包的 XMP。
+  // 这里的 dropped_xmp 只说容器里那种成包的 XMP，dropped_iptc 同理（那是
+  // JPEG 的 APP13 那一种），裸 TIFF 的 IPTC 走的是 0x83bb 那一条。
   //
   // 缩略图有两条消失的路，都要算进 dropped_thumbnail：
   // 一条是 IFD1 链（回写时整条不重发），另一条是 IFD0 里的
@@ -204,6 +212,7 @@ pub fn TiffBlock::redact(
       removed: report,
       dropped_thumbnail: self.has_ifd1 || (thumb_ptrs && !report.is_empty()),
       dropped_xmp: false,
+      dropped_iptc: false,
     },
   )
 }

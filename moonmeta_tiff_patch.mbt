@@ -126,11 +126,27 @@ pub fn tiff_redact_inplace(
 ) -> (Bytes, Redaction) raise MetaError {
   let plan = make_plan(data, ByPolicy(p))
   if plan.dropped == 0 {
-    (data, { removed: [], dropped_thumbnail: false, dropped_xmp: false, })
+    (
+      data,
+      {
+        removed: [],
+        dropped_thumbnail: false,
+        dropped_xmp: false,
+        dropped_iptc: false,
+      },
+    )
   } else {
+    // dropped_iptc 在这里恒为 false：裸 TIFF 的 IPTC 是 IFD0 里的一条（0x83bb），
+    // 它已经在 `removed` 清单里逐条交代过了。那个字段说的是 JPEG 的 APP13
+    // 那一种成包副本——条目清单天然装不下的那种。
     (
       apply_plan(data, plan),
-      { removed: plan.removed, dropped_thumbnail: false, dropped_xmp: false, },
+      {
+        removed: plan.removed,
+        dropped_thumbnail: false,
+        dropped_xmp: false,
+        dropped_iptc: false,
+      },
     )
   }
 }
@@ -143,11 +159,14 @@ pub fn tiff_redact_inplace(
 pub fn tiff_strip_inplace(data : Bytes) -> (Bytes, Strip) raise MetaError {
   let plan = make_plan(data, All)
   if plan.dropped == 0 {
-    (data, { had_exif: false, dropped_xmp: false, })
+    (data, { had_exif: false, dropped_xmp: false, dropped_iptc: false, })
   } else {
     // 与 `strip_any` 的裸 TIFF 分支同源：载体条目（XMP / Photoshop /
     // IPTC-NAA）就在 IFD0 里，看它在不在，而不是看它归哪一类。
-    (apply_plan(data, plan), { had_exif: true, dropped_xmp: plan.carrier, })
+    (
+      apply_plan(data, plan),
+      { had_exif: true, dropped_xmp: plan.carrier, dropped_iptc: false, },
+    )
   }
 }
 

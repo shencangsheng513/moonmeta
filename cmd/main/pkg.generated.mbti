@@ -8,6 +8,8 @@ package "shencangsheng513/moonmeta/cmd/main"
 // Types and methods
 type Action
 
+type Notes
+
 type Request
 
 type WriteMode

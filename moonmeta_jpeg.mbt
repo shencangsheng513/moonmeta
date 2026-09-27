@@ -23,6 +23,40 @@ let xmp_head : Array[Byte] = [
 ]
 
 ///|
+/// 分块存放的扩展 XMP 的头。同一份文档可能被切成好几段，每段都顶这个标识。
+///
+/// 只认标准那一种，等于让另一份副本安安静静地留在文件里，
+/// 而报告上说"XMP 已删"。
+let xmp_ext_head : Array[Byte] = [
+  b'h', b't', b't', b'p', b':', b'/', b'/', b'n', b's', b'.', b'a', b'd', b'o', b'b',
+  b'e', b'.', b'c', b'o', b'm', b'/', b'x', b'm', b'p', b'/', b'e', b'x', b't', b'e',
+  b'n', b's', b'i', b'o', b'n', b'/',
+]
+
+///|
+/// APP13 里 Photoshop 资源块的头（含结尾那个 NUL）。
+///
+/// IPTC-IIM 记录（署名、版权、联系人）就住在这包里，而它和 IFD0 里的
+/// `0x83bb` 是同一类东西：整包载体，逐条判断不了，只能整包丢。
+let iptc_head : Array[Byte] = [
+  b'P', b'h', b'o', b't', b'o', b's', b'h', b'o', b'p', b' ', b'3', b'.', b'0', b'\x00',
+]
+
+///|
+/// 公认"不装元数据"的几种载荷前缀：JFIF/JFXX 的应用标识、ICC 色彩描述子、
+/// Adobe 的量化与色彩变换。它们不出声。
+///
+/// 这份名单是逐条定的，不按段号整段放行：APP0 里也能塞一份真 EXIF，
+/// APP2 里除了 ICC 还有 MPF（缩略图链，常常自带坐标）。
+let structural_heads : Array[Array[Byte]] = [
+  [b'J', b'F', b'I', b'F', b'\x00'],
+  [b'J', b'F', b'X', b'X', b'\x00'],
+  [b'I', b'C', b'C', b'_', b'P', b'R', b'O', b'F', b'I', b'L', b'E', b'\x00'],
+  [b'A', b'd', b'o', b'b', b'e', b'\x00'],
+  [b'A', b'd', b'o', b'b', b'e', b'_', b'C', b'M', b'\x00'],
+]
+
+///|
 /// JPEG 里的一个段。`offset` 是段首那个 0xff 的位置，`length` 是整段的字节数，
 /// 所以段本身是 `[offset, offset+length)`。
 pub(all) struct JpegSegment {
@@ -52,7 +86,18 @@ pub(all) struct JpegMap {
   /// 走查时才知道确切的边界（段边界之前可能有任意多个 0xff 填充），
   /// 所以在这里记下来，删除时不再重新推导一遍。
   /// `has_xmp` 与它是同一件事的两种问法：`has_xmp == !xmp.is_empty()`。
+  /// 分块扩展 XMP 也算在这一项里：那是同一份文档的另一写法，不是另一件事。
   xmp : Array[(Int, Int)]
+  /// APP13 里 Photoshop 资源包（IPTC-IIM 住在里面）的段区间。
+  ///
+  /// 和 XMP 一样是"整包"，条目清单里永远看不见它，所以同样要单独记一项。
+  iptc : Array[(Int, Int)]
+  has_iptc : Bool
+  /// 我们既没读、也不会删的段：逐段点名，不替它编一句"应该没事"。
+  ///
+  /// 判据是载荷前缀，不是段号——见 `structural_heads` 那一段的理由。
+  /// 这一项为空的 JPEG，才是"除 EXIF/XMP/IPTC 之外没有别的地方藏东西"。
+  unread : Array[JpegSegment]
 } derive(Debug, Eq)
 
 ///|
@@ -75,6 +120,9 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
   let mut exif : (Int, Int)? = None
   let mut has_xmp = false
   let xmp_spans : Array[(Int, Int)] = []
+  let mut has_iptc = false
+  let iptc_spans : Array[(Int, Int)] = []
+  let unread : Array[JpegSegment] = []
   let mut p = 2
   let mut scan_end = n
   let mut done = false
@@ -113,17 +161,28 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
         scan_end = p + span
         done = true
       } else {
-        if marker == 0xe1 {
-          let payload = k + 3
-          if starts_with(data, payload, exif_head) {
-            match exif {
-              Some(_) => raise ExtraMetadata(payload)
-              None => exif = Some((payload + 6, p + span))
-            }
-          } else if starts_with(data, payload, xmp_head) {
-            has_xmp = true
-            xmp_spans.push((p, p + span))
+        let payload = k + 3
+        let is_xmp = marker == 0xe1 &&
+          (
+            starts_with(data, payload, xmp_head) ||
+            starts_with(data, payload, xmp_ext_head)
+          )
+        let is_iptc = marker == 0xed && starts_with(data, payload, iptc_head)
+        let unreadable = may_hold_metadata(marker) &&
+          !structural_payload(data, payload)
+        if marker == 0xe1 && starts_with(data, payload, exif_head) {
+          match exif {
+            Some(_) => raise ExtraMetadata(payload)
+            None => exif = Some((payload + 6, p + span))
           }
+        } else if is_xmp {
+          has_xmp = true
+          xmp_spans.push((p, p + span))
+        } else if is_iptc {
+          has_iptc = true
+          iptc_spans.push((p, p + span))
+        } else if unreadable {
+          unread.push({ marker, offset: p, length: span, })
         }
         segments.push({ marker, offset: p, length: span, })
         p = p + span
@@ -131,7 +190,34 @@ pub fn jpeg_inspect(data : Bytes) -> JpegMap raise MetaError {
     }
   }
   check_no_metadata_after(data, scan_end)
-  { segments, exif, has_xmp, xmp: xmp_spans, }
+  {
+    segments,
+    exif,
+    has_xmp,
+    xmp: xmp_spans,
+    has_iptc,
+    iptc: iptc_spans,
+    unread,
+  }
+}
+
+///|
+/// 可能藏元数据的段号：厂商应用段 APP0–APP15 与注释段 COM。
+///
+/// 其余段码（SOF/DHT/DQT/SOS/…）是编码结构与参数，不在"可能藏东西"的范围内。
+fn may_hold_metadata(marker : Int) -> Bool {
+  (marker >= 0xe0 && marker <= 0xef) || marker == 0xfe
+}
+
+///|
+/// 载荷前缀在"公认不装元数据"那份名单上。名单按前缀逐条定，见 `structural_heads`。
+fn structural_payload(data : Bytes, at : Int) -> Bool {
+  for head in structural_heads {
+    if starts_with(data, at, head) {
+      return true
+    }
+  }
+  false
 }
 
 ///|
@@ -147,13 +233,11 @@ fn standalone_marker(marker : Int) -> Bool {
 /// 压缩流之后不许再藏元数据：只处理第一份就是假脱敏。
 fn check_no_metadata_after(data : Bytes, from : Int) -> Unit raise MetaError {
   let to = data.length()
-  match find_bytes(data, from, to, exif_head) {
-    Some(off) => raise ExtraMetadata(off)
-    None => ()
-  }
-  match find_bytes(data, from, to, xmp_head) {
-    Some(off) => raise ExtraMetadata(off)
-    None => ()
+  for head in [exif_head, xmp_head, xmp_ext_head, iptc_head] {
+    match find_bytes(data, from, to, head) {
+      Some(off) => raise ExtraMetadata(off)
+      None => ()
+    }
   }
 }
 
@@ -228,28 +312,52 @@ pub fn jpeg_remove_exif(data : Bytes) -> (Bytes, Bool) raise MetaError {
 }
 
 ///|
+/// 补集搬运：把这些段区间之外的字节原样搬过去。
+///
+/// 之所以是"搬"而不是"重建文件"：压缩流、量化表、注释段一概不重新编码，
+/// 所以像素不可能被动到。
+fn drop_spans(data : Bytes, spans : Array[(Int, Int)]) -> Bytes {
+  let body = data.to_array()
+  let out : Array[Byte] = []
+  let mut cursor = 0
+  for (s, e) in spans {
+    push_all(out, body, cursor, s)
+    cursor = e
+  }
+  push_all(out, body, cursor, body.length())
+  Bytes::from_array(out)
+}
+
+///|
 /// 整段摘掉 APP1/XMP，并报告"原本确实有一段"。
 ///
 /// 为什么必须动这一段：XMP 里是同一批事实的第二份副本——真实语料里
 /// `exif:DateTimeOriginal`、`tiff:Make/Model`、`dc:creator`、`aux:SerialNumber`
 /// 都出现过。EXIF 删干净、XMP 原样留着，报告上一切正常，实际什么都没脱。
-///
-/// 做法是"把这些段的补集原样搬过去"，不是"重建文件"：压缩流、量化表、
-/// 注释段一概不重新编码，所以像素不可能被动到。
 pub fn jpeg_drop_xmp(data : Bytes) -> (Bytes, Bool) raise MetaError {
-  let map = jpeg_inspect(data)
-  if map.xmp.is_empty() {
+  let spans = jpeg_inspect(data).xmp
+  if spans.is_empty() {
     (data, false)
   } else {
-    let body = data.to_array()
-    let out : Array[Byte] = []
-    let mut cursor = 0
-    for (s, e) in map.xmp {
-      push_all(out, body, cursor, s)
-      cursor = e
-    }
-    push_all(out, body, cursor, body.length())
-    (Bytes::from_array(out), true)
+    (drop_spans(data, spans), true)
+  }
+}
+
+///|
+/// 整段摘掉 APP13 的 Photoshop 资源包（IPTC-IIM 住在里面），并报告"原本确实有一段"。
+///
+/// 和 XMP 同一个道理，也同一条待遇：整包判断不了里面哪条敏不敏感，
+/// 但"留着整包"一定比"整包丢掉"更糟——IFD0 里的 `0x83bb`/`0x02bd` 早就是整条丢的，
+/// 只差 JPEG 这一份副本没说。不认它，`strip` 那句"摘干净"就是假的。
+///
+/// 只动带 `Photoshop 3.0\0` 头的那几段：APP13 里还有 Adobe 的色彩管理包，
+/// 删它会把颜色改掉，而它一条隐私都不装。
+pub fn jpeg_drop_iptc(data : Bytes) -> (Bytes, Bool) raise MetaError {
+  let spans = jpeg_inspect(data).iptc
+  if spans.is_empty() {
+    (data, false)
+  } else {
+    (drop_spans(data, spans), true)
   }
 }
 
@@ -262,7 +370,15 @@ pub fn jpeg_redact(
   let map = jpeg_inspect(data)
   let (out, report) = match map.exif {
     None =>
-      (data, { removed: [], dropped_thumbnail: false, dropped_xmp: false, })
+      (
+        data,
+        {
+          removed: [],
+          dropped_thumbnail: false,
+          dropped_xmp: false,
+          dropped_iptc: false,
+        },
+      )
     Some((s, e)) => {
       let block = decode_tiff(slice_bytes(data, s, e))
       let (kept, report) = block.redact(p)
@@ -276,13 +392,14 @@ pub fn jpeg_redact(
       }
     }
   }
-  // 第二趟重新走查一遍，不沿用第一趟的偏移：EXIF 段的长度已经变了，
-  // 记在旧偏移上的 XMP 段位置这时候是错的。
+  // 第二趟、第三趟都重新走查一遍，不沿用上一趟的偏移：EXIF 段的长度已经变了，
+  // 记在旧偏移上的 XMP 段位置这时候是错的；摘掉 XMP 之后 IPTC 的偏移又错了一次。
   if !p.covers(Carrier) {
     (out, report)
   } else {
     let (out2, dropped) = jpeg_drop_xmp(out)
-    (out2, { ..report, dropped_xmp: dropped, })
+    let (out3, dropped_iptc) = jpeg_drop_iptc(out2)
+    (out3, { ..report, dropped_xmp: dropped, dropped_iptc, })
   }
 }
 
@@ -409,7 +526,14 @@ pub fn JpegMap::describe(self : JpegMap) -> String {
     head = head + " \{s.name()}@\{s.offset}"
   }
   if self.has_xmp {
-    head + " ; 另含 XMP 包 \{self.xmp.length()} 段"
+    head = head + " ; 另含 XMP 包 \{self.xmp.length()} 段"
+  }
+  if self.has_iptc {
+    head = head + " ; 另含 IPTC/Photoshop 包 \{self.iptc.length()} 段"
+  }
+  if !self.unread.is_empty() {
+    let names = self.unread.map(s => "\{s.name()}@\{s.offset}").join(" ")
+    head + " ; 未解析段 \{self.unread.length()} 段：\{names}"
   } else {
     head
   }

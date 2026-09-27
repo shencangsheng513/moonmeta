@@ -20,6 +20,8 @@ pub fn encode_tiff(TiffBlock) -> Bytes raise MetaError
 
 pub fn jpeg_decode(Bytes) -> TiffBlock? raise MetaError
 
+pub fn jpeg_drop_iptc(Bytes) -> (Bytes, Bool) raise MetaError
+
 pub fn jpeg_drop_xmp(Bytes) -> (Bytes, Bool) raise MetaError
 
 pub fn jpeg_exif(Bytes) -> Bytes? raise MetaError
@@ -142,6 +144,9 @@ pub(all) struct JpegMap {
   exif : (Int, Int)?
   has_xmp : Bool
   xmp : Array[(Int, Int)]
+  iptc : Array[(Int, Int)]
+  has_iptc : Bool
+  unread : Array[JpegSegment]
 } derive(Eq, @debug.Debug)
 pub fn JpegMap::describe(Self) -> String
 pub fn JpegMap::equal(Self, Self) -> Bool
@@ -183,6 +188,7 @@ pub(all) struct PngMap {
   chunks : Array[PngChunk]
   exif : (Int, Int)?
   has_xmp : Bool
+  unread : Array[PngChunk]
 } derive(Eq, @debug.Debug)
 pub fn PngMap::describe(Self) -> String
 pub fn PngMap::equal(Self, Self) -> Bool
@@ -219,6 +225,7 @@ pub(all) struct Redaction {
   removed : Array[Removed]
   dropped_thumbnail : Bool
   dropped_xmp : Bool
+  dropped_iptc : Bool
 } derive(Eq, @debug.Debug)
 pub fn Redaction::equal(Self, Self) -> Bool
 pub fn Redaction::not_equal(Self, Self) -> Bool
@@ -254,6 +261,7 @@ pub impl Show for Sensitive
 pub(all) struct Strip {
   had_exif : Bool
   dropped_xmp : Bool
+  dropped_iptc : Bool
 } derive(Eq, @debug.Debug)
 pub fn Strip::equal(Self, Self) -> Bool
 pub fn Strip::not_equal(Self, Self) -> Bool

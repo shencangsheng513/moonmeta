@@ -151,6 +151,47 @@ test "缩略图那句话只在真丢了的时候说" {
 }
 
 ///|
+/// 金标准测试用的一条构造：`read --json` / `audit --json` 的第三、四个键。
+fn notes(xmp : Bool, iptc : Bool, unread : Array[String]) -> Notes {
+  { xmp, iptc, unread, }
+}
+
+///|
+/// IPTC/Photoshop 包那句话与 XMP 那句同构，但两句不许混用：
+/// 它们是文件里两个不同的包，只钉一句的话另一句改坏了没人知道。
+test "iptc_note 三态各有一句，且与 xmp_note 不同文" {
+  @test.assert_eq(
+    iptc_note(true, true),
+    "，并整包摘除 IPTC/Photoshop 包",
+  )
+  @test.assert_eq(
+    iptc_note(true, false),
+    "；警告：IPTC/Photoshop 包还在，当前策略不碰它",
+  )
+  @test.assert_eq(iptc_note(false, false), "")
+  @test.assert_eq(iptc_note(true, true) != xmp_note(true, true), true)
+  @test.assert_eq(iptc_note(true, false) != xmp_note(true, false), true)
+}
+
+///|
+/// audit 的两句载体警告：策略覆盖时"会整包摘除"，不覆盖时必须出声。
+/// 把后者按前者处理就是让用户以为已经删干净。
+test "audit 的 IPTC 警告按策略两态分开" {
+  @test.assert_eq(
+    iptc_carrier_note(@lib.strict_policy()).contains("会整包摘除"),
+    true,
+  )
+  @test.assert_eq(
+    iptc_carrier_note(@lib.empty_policy()).contains("警告"),
+    true,
+  )
+  @test.assert_eq(
+    iptc_carrier_note(@lib.empty_policy()).contains("会整包摘除"),
+    false,
+  )
+}
+
+///|
 test "XMP 那句话说的是三件事，不是一件事" {
   // 摘掉了：要报告，否则下一次没人知道这里原本有过一整包元数据
   @test.assert_eq(xmp_note(true, true), "，并整包摘除 XMP")
@@ -171,25 +212,40 @@ test "XMP 那句话说的是三件事，不是一件事" {
 /// 四个状态各有一句，改措辞必须先红在这里，而不是红在一次跑批里。
 test "strip 那句话按载体点名，否定那句也不能多说" {
   @test.assert_eq(
-    strip_said({ had_exif: true, dropped_xmp: true, }),
+    strip_said({ had_exif: true, dropped_xmp: true, dropped_iptc: false, }),
     "元数据已整段摘除：EXIF,XMP 包。",
   )
   @test.assert_eq(
-    strip_said({ had_exif: true, dropped_xmp: false, }),
+    strip_said({ had_exif: true, dropped_xmp: false, dropped_iptc: false, }),
     "元数据已整段摘除：EXIF。",
   )
   @test.assert_eq(
-    strip_said({ had_exif: false, dropped_xmp: true, }),
+    strip_said({ had_exif: false, dropped_xmp: true, dropped_iptc: false, }),
     "元数据已整段摘除：XMP 包。",
   )
-  let absent = strip_said({ had_exif: false, dropped_xmp: false, })
+  // IPTC 单独占一格：EXIF 与 XMP 都没有、只有那包 Photoshop 时，
+  // 这句话必须点名它——少了这一格，"摘干净"就会盖住一个只带 IPTC 的文件。
   @test.assert_eq(
-    absent, "这个文件本来就没有 EXIF，也没有 XMP 包。",
+    strip_said({ had_exif: false, dropped_xmp: false, dropped_iptc: true, }),
+    "元数据已整段摘除：IPTC/Photoshop 包。",
+  )
+  @test.assert_eq(
+    strip_said({ had_exif: true, dropped_xmp: true, dropped_iptc: true, }),
+    "元数据已整段摘除：EXIF,XMP 包,IPTC/Photoshop 包。",
+  )
+  let absent = strip_said({
+    had_exif: false,
+    dropped_xmp: false,
+    dropped_iptc: false,
+  })
+  @test.assert_eq(
+    absent, "这个文件本来就没有 EXIF，也没有 XMP 包与 IPTC 包。",
   )
   // 否定那句里同样写着 EXIF 与 XMP 两个字面：
   // 对拍脚本因此按"点名了哪些载体"判，不做子串查找。
   @test.assert_eq(absent.contains("EXIF"), true)
   @test.assert_eq(absent.contains("XMP 包"), true)
+  @test.assert_eq(absent.contains("已整段摘除"), false)
 }
 
 ///|
@@ -266,12 +322,12 @@ fn block(little : Bool, gps : Array[@lib.IfdEntry]) -> @lib.TiffBlock {
 /// 整行断言，不是"包含某个子串"：键序、括号、每处转义都在比对范围内。
 /// 这份输出是对外承诺的机读格式，改一个字就算破坏兼容。
 test "read --json 是金标准：四个目录、键序固定、查名字各按各的目录" {
-  let want = "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"exif\":true,\"byte_order\":\"II\",\"directories\":[{\"dir\":\"IFD0\",\"entries\":[{\"tag\":2,\"name\":\"0x0002\",\"type\":3,\"value\":\"Shorts(1 value(s))\"}]},{\"dir\":\"Exif\",\"entries\":[]},{\"dir\":\"GPS\",\"entries\":[{\"tag\":2,\"name\":\"GPSLatitude\",\"type\":5,\"value\":\"Rationals(0 value(s))\"}]},{\"dir\":\"Interop\",\"entries\":[{\"tag\":1,\"name\":\"InteropIndex\",\"type\":2,\"value\":\"\\\"R98\\\"\"}]}],\"has_ifd1\":false,\"gps\":null}"
+  let want = "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"iptc\":false,\"unread\":[],\"exif\":true,\"byte_order\":\"II\",\"directories\":[{\"dir\":\"IFD0\",\"entries\":[{\"tag\":2,\"name\":\"0x0002\",\"type\":3,\"value\":\"Shorts(1 value(s))\"}]},{\"dir\":\"Exif\",\"entries\":[]},{\"dir\":\"GPS\",\"entries\":[{\"tag\":2,\"name\":\"GPSLatitude\",\"type\":5,\"value\":\"Rationals(0 value(s))\"}]},{\"dir\":\"Interop\",\"entries\":[{\"tag\":1,\"name\":\"InteropIndex\",\"type\":2,\"value\":\"\\\"R98\\\"\"}]}],\"has_ifd1\":false,\"gps\":null}"
   let got = read_json(
     "x.jpg",
     @lib.Jpeg,
     Some(block(true, [{ tag: 2, type_code: 5, value: @lib.Rationals([]), }])),
-    false,
+    notes(false, false, []),
   )
   @test.assert_eq(got, want)
 }
@@ -282,15 +338,39 @@ test "read --json 是金标准：四个目录、键序固定、查名字各按�
 /// "敏感东西在逐条清单装不下的那个包里"。
 test "read --json 的 xmp 键：没有元数据 ≠ 没有元数据" {
   @test.assert_eq(
-    read_json("x.jpg", @lib.Jpeg, None, true),
-    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":true,\"exif\":false}",
+    read_json("x.jpg", @lib.Jpeg, None, notes(true, false, [])),
+    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":true,\"iptc\":false,\"unread\":[],\"exif\":false}",
+  )
+}
+
+///|
+/// IPTC 与未解析段各占一个键，和 XMP 那个键互不遮蔽：
+/// 一个文件可以同时"有 XMP、有 IPTC、还有几段我们根本不读"。
+test "read --json 的 iptc 与 unread 键：三种状态分得开" {
+  @test.assert_eq(
+    read_json("x.jpg", @lib.Jpeg, None, notes(false, true, [])),
+    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"iptc\":true,\"unread\":[],\"exif\":false}",
+  )
+  @test.assert_eq(
+    read_json(
+      "x.jpg",
+      @lib.Jpeg,
+      None,
+      notes(false, false, ["APP13@318", "COM@520"]),
+    ),
+    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"iptc\":false,\"unread\":[\"APP13@318\",\"COM@520\"],\"exif\":false}",
+  )
+  // 转义：未解析段的名字来自库，走的是同一个 json_str，不许原样吐出引号
+  @test.assert_eq(
+    read_json("x.jpg", @lib.Jpeg, None, notes(false, false, ["a\"b"])),
+    "{\"file\":\"x.jpg\",\"container\":\"jpeg\",\"xmp\":false,\"iptc\":false,\"unread\":[\"a\\\"b\"],\"exif\":false}",
   )
 }
 
 ///|
 test "大端块要说 MM，别一律报 II" {
-  let be = read_json("x.tif", @lib.Tiff, Some(block(false, [])), false)
-  let le = read_json("x.tif", @lib.Tiff, Some(block(true, [])), false)
+  let be = read_json("x.tif", @lib.Tiff, Some(block(false, [])), empty_notes())
+  let le = read_json("x.tif", @lib.Tiff, Some(block(true, [])), empty_notes())
   assert_true(contains_byte_order(be, "MM"))
   assert_true(contains_byte_order(le, "II"))
 }
@@ -303,8 +383,8 @@ fn contains_byte_order(json : String, order : String) -> Bool {
 ///|
 test "没有 EXIF 的文件：exif 是 false，且根本不给 directories 键" {
   @test.assert_eq(
-    read_json("plain.png", @lib.Png, None, false),
-    "{\"file\":\"plain.png\",\"container\":\"png\",\"xmp\":false,\"exif\":false}",
+    read_json("plain.png", @lib.Png, None, empty_notes()),
+    "{\"file\":\"plain.png\",\"container\":\"png\",\"xmp\":false,\"iptc\":false,\"unread\":[],\"exif\":false}",
   )
 }
 
@@ -316,9 +396,9 @@ test "audit --json：一条没命中也要给空数组，不能把键省掉" {
       "privacy",
       Some(block(true, [])),
       @lib.empty_policy(),
-      false,
+      empty_notes(),
     ),
-    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":false,\"exif\":true,\"findings\":[]}",
+    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":false,\"iptc\":false,\"unread\":[],\"exif\":true,\"findings\":[]}",
   )
   // 空清单 + xmp:false 与 空清单 + xmp:true 是两个结论，必须都能表达：
   // 后者说的是"敏感东西在策略管不到的包里"。
@@ -328,9 +408,21 @@ test "audit --json：一条没命中也要给空数组，不能把键省掉" {
       "privacy",
       Some(block(true, [])),
       @lib.empty_policy(),
-      true,
+      notes(true, false, []),
     ),
-    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":true,\"exif\":true,\"findings\":[]}",
+    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":true,\"iptc\":false,\"unread\":[],\"exif\":true,\"findings\":[]}",
+  )
+  // 上一格只钉得住"xmp 抄错了键"，钉不住"iptc 永远报 false"——这一格补上：
+  // findings 为空 + iptc:true 说的是第三条路"敏感东西在没解析的那包里"。
+  @test.assert_eq(
+    audit_json(
+      "x.jpg",
+      "privacy",
+      Some(block(true, [])),
+      @lib.empty_policy(),
+      notes(false, true, ["APP13@318"]),
+    ),
+    "{\"file\":\"x.jpg\",\"policy\":\"privacy\",\"xmp\":false,\"iptc\":true,\"unread\":[\"APP13@318\"],\"exif\":true,\"findings\":[]}",
   )
 }
 
@@ -373,7 +465,7 @@ test "JSON 里的字符串一律转成 ASCII：引号、反斜杠、控制符、
 
 ///|
 test "中文文件名不会把非法字节漏进 JSON 输出" {
-  let s = read_json("C:\\图\\a.jpg", @lib.Jpeg, None, false)
+  let s = read_json("C:\\图\\a.jpg", @lib.Jpeg, None, empty_notes())
   let non_ascii = s.to_array().filter(c => c.to_int() >= 128)
   @test.assert_eq(non_ascii.length(), 0)
   assert_true(s.contains("\\u56fe"))
@@ -505,7 +597,10 @@ test "链的三态：有、没有、容器里没有这一块" {
 test "原位 strip 的条数从产物里数，读不通就一句都不说" {
   let out = @lib.encode_tiff(three_entries())
   @test.assert_eq(kept_image_entries(out), 3)
-  let s = inplace_strip_said({ had_exif: true, dropped_xmp: false, }, out)
+  let s = inplace_strip_said(
+    { had_exif: true, dropped_xmp: false, dropped_iptc: false, },
+    out,
+  )
   assert_true(s.contains("IFD0 里留着 3 条"))
   assert_true(s.contains("EXIF"))
   // 一份根本不是 TIFF 的字节：数不出条数，那句话也就不许出现
@@ -513,7 +608,18 @@ test "原位 strip 的条数从产物里数，读不通就一句都不说" {
     b'I', b'Q', b'*', b'\x00', b'\x08', b'\x00', b'\x00', b'\x00',
   ])
   @test.assert_eq(kept_image_entries(junk), 0)
-  let g = inplace_strip_said({ had_exif: false, dropped_xmp: false, }, junk)
+  let g = inplace_strip_said(
+    { had_exif: false, dropped_xmp: false, dropped_iptc: false, },
+    junk,
+  )
   assert_true(g.contains("一个字节都没改"))
   assert_true(!g.contains("IFD0 里留着"))
+  // 只有 IPTC 那一格：判据里少了 dropped_iptc 的话，这里会说"一个字节都没改"，
+  // 而同一句话下面列着刚摘掉的包——自相矛盾的话不许出门。
+  let only_iptc = inplace_strip_said(
+    { had_exif: false, dropped_xmp: false, dropped_iptc: true, },
+    junk,
+  )
+  assert_true(only_iptc.contains("IPTC/Photoshop 包"))
+  @test.assert_eq(only_iptc.contains("一个字节都没改"), false)
 }

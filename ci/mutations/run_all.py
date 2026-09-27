@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
-"""把 ci/mutations/ 里的七个驱动一次跑一个，并且**替它们判定收尾**。
+"""把 ci/mutations/ 里的每个驱动一次跑一个，并且**替它们判定收尾**。
+
+驱动名单只有一个来源：下面的 `SPECS`（打印里的期望数就是它的长度）。
 
 为什么要有这个文件：申报书里那句"每一句'会红'都由变异驱动钉住"，如果复算方式
-是"人眼看七个日志的最后一行"，那它就不是一个可复算的主张。更要紧的是判定本身会错——
+是"人眼看每个日志的最后一行"，那它就不是一个可复算的主张。更要紧的是判定本身会错——
 按子串扫 "FAIL" 会把绿读成红（`mut_explain` 正常收尾时，unittest 照样会打 FAILED），
 而 CAUGHT 行会把期望文案整句打出来，那句里就有"对不上"三个字。所以判定只认每个驱动
 自己那几行顶格收尾语，外加两组"必须相等"的计数。
 
-三种用法：
-    python ci/mutations/run_all.py                 # 串行跑全部七个，跑完判定
+四种用法：
+    python ci/mutations/run_all.py                 # 串行跑全部驱动，跑完判定
     python ci/mutations/run_all.py --report DIR    # 只判定 DIR 里已有的 <驱动名>.log，不起子进程
+    python ci/mutations/run_all.py --ci            # 只实跑「不要外来语料」的那几个（CI 那一步）
     python ci/mutations/run_all.py --selftest      # 判定器自己：真日志收尾行 + 两向变异
 
 退码：全绿 0；有红 1；用法错 2。注意 `mut_explain` 自己恒返回 0（源码里没有 sys.exit），
@@ -69,8 +72,31 @@ SPECS = {
         red_re=[r"^MISSED ", r"^SKIP  ", r"^!!!   ", r"^没抓到：", r"^基线不绿"],
         rc_is_verdict=True,
     ),
+    "mut_d9e.py": dict(
+        green_re=[r"^期望表态 (\d+) 处，抓到 (\d+) 处$",
+                  r"^开跑前锚点清点：(\d+)/(\d+) ",
+                  r"^基线自检（crosscheck_selftest）：rc=0",
+                  r"^还原对账：sha [0-9a-f]+ vs 基线 [0-9a-f]+ -> 一致$"],
+        red_re=[r"^MISSED ", r"^SKIP  ", r"^!!!   ", r"^没抓到：", r"^基线不绿",
+                r"^还原对账：.*-> 不一致$"],
+        rc_is_verdict=True,
+    ),
 }
 DRIVERS = list(SPECS)
+
+# 每个驱动要不要外来语料。这件事必须**声明**而不是推断：CI 上跑哪几个、
+# 本机全量跑哪几个，都由这张表说了算。缺席不当"不要语料"——名单悄悄变短
+# 会让 CI 少跑一个驱动还全绿，所以 --selftest 里有一条双向差集钉住它。
+NEEDS_CORPUS = {
+    "mut_explain.py": False,   # 改坏的是 python 侧判据，喂合成字节
+    "mut_d7.py": True,         # 要 .scratch 下的外来照片
+    "mut_d8.py": True,         # 要 .scratch/tif-subset
+    "mut_d10.py": True,        # 要 .scratch/tif-samples
+    "mut_d11b.py": False,      # 驱动是 inplace_crosscheck --selftest
+    "mut_d12.py": False,       # 驱动是 crosscheck_selftest
+    "mut_d13.py": False,       # 驱动是 replay_cli --check-only
+    "mut_d9e.py": False,       # 驱动是 crosscheck_selftest
+}
 
 # 两组"必须自己相等"的计数：注入的格数 vs 抓到红的格数；锚点在位数 vs 锚点总数。
 PAIRS = [
@@ -87,6 +113,7 @@ RED_LINES = {
     "mut_d11b.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
     "mut_d12.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
     "mut_d13.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
+    "mut_d9e.py": "MISSED Z9：rc=0，要求红在「x」上\n",
 }
 
 
@@ -148,7 +175,7 @@ def run_one(name, log_path):
 
 
 def cmd_report(log_dir):
-    """只判定已有日志：七个都得在，缺一个就是红（计数闸，不是否定式文本闸）。"""
+    """只判定已有日志：名单里的都得在，缺一个就是红（计数闸，不是否定式文本闸）。"""
     missing, greens = [], 0
     for name in DRIVERS:
         log = log_dir / (name.replace(".py", "") + ".log")
@@ -162,8 +189,51 @@ def cmd_report(log_dir):
         emit(name, ok, problems, measured, extra="   （日志时间 {}，未起子进程）".format(when))
     if missing:
         print("RED    日志缺 {} 个：{}".format(len(missing), "、".join(missing)))
-    print("\n七个驱动绿 {} 个（期望 {}）".format(greens, len(DRIVERS)))
+    print("\n{} 个驱动里绿 {} 个（期望 {}）".format(
+        len(DRIVERS), greens, len(DRIVERS)))
     return 0 if greens == len(DRIVERS) and not missing else 1
+
+
+def cmd_ci():
+    """CI 实跑的那一步：只跑声明为"不要外来语料"的驱动，一个都不许少。
+
+    这里不用否定式判断（"跑不了语料的跳过"）：那样一个新驱动只要忘了登记
+    就会**悄悄不进 CI**。名单由 `NEEDS_CORPUS` 声明，两边差集必须为空。
+    """
+    untagged = [n for n in DRIVERS if n not in NEEDS_CORPUS]
+    orphan = [n for n in NEEDS_CORPUS if n not in SPECS]
+    for n in untagged:
+        print("RED  {} 没声明要不要语料，CI 名单不敢猜".format(n))
+    for n in orphan:
+        print("RED  {} 声明了但 SPECS 里没有它（名单是死的）".format(n))
+    if untagged or orphan:
+        return 1
+    free = [n for n in DRIVERS if NEEDS_CORPUS[n] is False]
+    if not free:
+        print("RED  语料无关的驱动一个都没有——空名单不等于全过")
+        return 1
+    dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print("工作树不干净，先停下（变异驱动要按字节还原目标文件）：\n"
+              + dirty[:800])
+        return 2
+    logs = REPO / ".scratch" / "mutations-ci"
+    greens = 0
+    for name in free:
+        rc, txt = run_one(name, logs / (name.replace(".py", "") + ".log"))
+        ok, problems, measured = judge(name, rc, txt)
+        greens += ok
+        emit(name, ok, problems, measured, extra="   （语料无关）")
+    print("\n{} 个语料无关的驱动里绿 {} 个（期望 {}）".format(
+        len(free), greens, len(free)))
+    after = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
+                           capture_output=True, text=True).stdout.strip()
+    if after:
+        print("RED  跑完工作树不干净（有驱动的按字节还原没做到位）：\n"
+              + after[:800])
+        return 1
+    return 0 if greens == len(free) else 1
 
 
 def cmd_run(log_dir):
@@ -181,7 +251,8 @@ def cmd_run(log_dir):
         emit(name, ok, problems, measured)
     dirty = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
                            capture_output=True, text=True).stdout.strip()
-    print("\n七个驱动绿 {} 个（期望 {}）".format(greens, len(DRIVERS)))
+    print("\n{} 个驱动里绿 {} 个（期望 {}）".format(
+        len(DRIVERS), greens, len(DRIVERS)))
     if dirty:
         print("RED  跑完工作树仍不干净（还原没做到位）：\n" + dirty[:800])
         return 1
@@ -207,6 +278,15 @@ TRUTH_TABLE = [
                    "开跑前锚点清点：5/5 恰好在位一次\n期望表态 5 处，抓到 5 处", 0, True),
     ("mut_d13.py", "基线复放（--check-only）：rc=1，清单对账：11 个步骤、28 条命令，两个口径一致\n"
                    "开跑前锚点清点：5/5 恰好在位一次\n期望表态 5 处，抓到 5 处", 0, False),
+    ("mut_d9e.py", "开跑前锚点清点：16/16 恰好在位一次\n"
+                   "基线自检（crosscheck_selftest）：rc=0，OK\n"
+                   "期望表态 16 处，抓到 16 处\n"
+                   "还原对账：sha 9adf15e4f410 vs 基线 9adf15e4f410 -> 一致", 0, True),
+    ("mut_d9e.py", "开跑前锚点清点：16/16 恰好在位一次\n"
+                   "基线自检（crosscheck_selftest）：rc=0，OK\n"
+                   "期望表态 16 处，抓到 15 处\n没抓到：N7 不再拦同一份字节报两遍\n"
+                   "还原对账：sha 9adf15e4f410 vs 基线 9adf15e4f410 -> 一致", 0, False),
+    ("mut_d9e.py", "开跑前锚点清点：16/16 恰好在位一次\n基线不绿，先修闸再谈变异。", 1, False),
 ]
 
 
@@ -231,16 +311,27 @@ def cmd_selftest():
         print("{}  {} 注入红句翻红{}".format(
             "ok  " if good else "FAIL", name,
             "" if good else "——判定器瞎：{}".format("；".join(problems)[:120])))
-    print("\n判定器真值表：{} 格，错 {} 格".format(len(TRUTH_TABLE) + len(RED_LINES), fails))
+    # CI 跑哪几个驱动由 NEEDS_CORPUS 决定；这张表瞎了就是悄悄少跑，所以它也进真值表。
+    untagged = [n for n in DRIVERS if n not in NEEDS_CORPUS]
+    orphan = [n for n in NEEDS_CORPUS if n not in SPECS]
+    census_ok = not untagged and not orphan
+    fails += not census_ok
+    print("{}  语料名单双向差集为空（SPECS {} 个 / 声明 {} 个）{}".format(
+        "ok  " if census_ok else "FAIL", len(SPECS), len(NEEDS_CORPUS),
+        "" if census_ok else "　缺声明：" + "、".join(untagged + orphan)))
+    print("\n判定器真值表：{} 格，错 {} 格".format(
+        len(TRUTH_TABLE) + len(RED_LINES) + 1, fails))
     return 0 if fails == 0 else 1
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="串行跑七个变异驱动并替它们判定收尾")
+    ap = argparse.ArgumentParser(description="串行跑全部变异驱动并替它们判定收尾")
     ap.add_argument("--report", type=Path, metavar="DIR",
                     help="只判定 DIR 里已有的 <驱动名>.log，不起子进程")
     ap.add_argument("--selftest", action="store_true",
                     help="判定器自己的真值表（不起子进程、不碰语料）")
+    ap.add_argument("--ci", action="store_true",
+                    help="只实跑声明为「不要外来语料」的那些驱动（CI 上那一步）")
     ap.add_argument("--logs", type=Path, default=REPO / ".scratch" / "mutations",
                     help="跑批日志目录（默认 .scratch/mutations）")
     ap.add_argument("--moon", default=None, help="moon 可执行文件路径")
@@ -249,6 +340,8 @@ def main(argv):
         os.environ["MOON"] = args.moon
     if args.selftest:
         return cmd_selftest()
+    if args.ci:
+        return cmd_ci()
     if args.report:
         return cmd_report(args.report if args.report.is_absolute() else REPO / args.report)
     logs = args.logs if args.logs.is_absolute() else REPO / args.logs

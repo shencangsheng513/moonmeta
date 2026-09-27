@@ -166,11 +166,18 @@ test "APP1 里的 EXIF 读出来和裸 TIFF 块一模一样" {
 }
 
 ///|
+/// 夹具里那条 COM 注释（`moonbit test`）是"我们读不了、也不假装删掉了"的那一类：
+/// 它必须在 describe 里点名下落，不许被静默略过。
 test "段表的命名与偏移逐段可查，EXIF 载荷正好是那段 TIFF" {
   let file = jpeg_with(Some(fixture()))
   let map = inspect_ok(file)
-  @test.assert_eq(map.describe(), "JPEG SOI@0 APP0@2 APP1@20 COM@256 SOS@272")
+  @test.assert_eq(
+    map.describe(),
+    "JPEG SOI@0 APP0@2 APP1@20 COM@256 SOS@272 ; 未解析段 1 段：COM@256",
+  )
   @test.assert_eq(map.has_xmp, false)
+  @test.assert_eq(map.has_iptc, false)
+  @test.assert_eq(map.unread.map(s => "\{s.name()}@\{s.offset}"), ["COM@256"])
   match map.exif {
     None => fail("expected an EXIF span")
     Some((s, e)) => {
@@ -298,6 +305,237 @@ test "摘 XMP 只摘那一段：EXIF 还读得出来，尾巴一个字节没动"
   }
   @test.assert_eq(second, false)
   @test.assert_eq(again, out)
+}
+
+///|
+/// APP13 里的 Photoshop 资源包：头是 `Photoshop 3.0\0`，后面跟 8BIM 记录。
+/// 这一层不看记录内容——判据只有那个头。
+fn iptc_payload() -> Array[Byte] {
+  let out = ascii("Photoshop 3.0")
+  push(out, [b'\x00'])
+  push(out, ascii("8BIM"))
+  push(out, [
+    b'\x1c', b'\x02', b'\x00', b'\x00', b'\x00', b'\x00', b'\x00', b'\x00',
+  ])
+  push(out, ascii("Byline=camera owner"))
+  out
+}
+
+///|
+/// 分块扩展 XMP（`http://ns.adobe.com/xmp/extension/`）：Photoshop 写超大 XMP
+/// 时用这一段，头后面跟 GUID 与四段长度，最后才是 RDF。
+fn xmp_ext_payload() -> Array[Byte] {
+  let out = ascii("http://ns.adobe.com/xmp/extension/")
+  push(out, [b'\x00'])
+  push(out, ascii("0123456789abcdef0123456789abcdef"))
+  push(out, [b'\x00', b'\x00', b'\x01', b'\x00'])
+  push(out, [b'\x00', b'\x00', b'\x00', b'\x00'])
+  push(out, [b'\x00', b'\x00', b'\x00', b'\x04'])
+  push(out, ascii("xmp="))
+  out
+}
+
+///|
+/// 在压缩流之前插一段自定义载荷——真实文件里的 IPTC、扩展 XMP 就住在这种位置。
+fn with_extra_seg(
+  tiff : Bytes?,
+  marker : Int,
+  payload : Array[Byte],
+) -> Bytes raise {
+  let base = jpeg_with(tiff)
+  let mut cut = base.length()
+  for s in inspect_ok(base).segments {
+    if s.name() == "SOS" {
+      cut = s.offset
+    }
+  }
+  @test.assert_eq(cut < base.length(), true)
+  let out : Array[Byte] = []
+  push(out, span(base, 0, cut))
+  push(out, var_seg(marker, payload))
+  push(out, span(base, cut, base.length()))
+  Bytes::from_array(out)
+}
+
+///|
+/// 标识串 + 结尾 NUL + 后续几个字节：`ascii` 打不出 NUL，夹具要自己拼。
+fn tag_payload(s : String, rest : Array[Byte]) -> Array[Byte] {
+  let out = ascii(s)
+  push(out, [b'\x00'])
+  push(out, rest)
+  out
+}
+
+///|
+/// 尾巴补一个 NUL：真实标识串都以 NUL 结束，`ascii` 造不出这个字节。
+fn with_nul(s : String) -> Array[Byte] {
+  tag_payload(s, [])
+}
+
+///|
+/// APP13 是"整包载体"：认得出、点得名，但不进逐条清单，也不算未解析段——
+/// 一个已经说了名字的东西不许同时挂在"我们没看见"那一栏里。
+test "APP13 的 Photoshop 包会被点名，但不冒充 EXIF" {
+  let file = with_extra_seg(Some(fixture()), 0xed, iptc_payload()) catch {
+    e => fail("build failed: \{e}")
+  }
+  let map = inspect_ok(file)
+  @test.assert_eq(map.has_iptc, true)
+  @test.assert_eq(map.iptc.length(), 1)
+  @test.assert_eq(map.has_xmp, false)
+  @test.assert_eq(map.unread.map(s => s.name()), ["COM"])
+  @test.assert_eq(decoded(file).gps.length(), 4)
+  assert_true(map.describe().contains("另含 IPTC/Photoshop 包 1 段"))
+}
+
+///|
+test "摘 IPTC 只摘那一段：EXIF、注释、尾巴都原样留着" {
+  let file = with_extra_seg(Some(fixture()), 0xed, iptc_payload()) catch {
+    e => fail("build failed: \{e}")
+  }
+  let before = inspect_ok(file).segments.length()
+  let (out, dropped) = @moonmeta.jpeg_drop_iptc(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(dropped, true)
+  @test.assert_eq(inspect_ok(out).has_iptc, false)
+  @test.assert_eq(inspect_ok(out).segments.length(), before - 1)
+  @test.assert_eq(decoded(out).gps.length(), 4)
+  @test.assert_eq(contains_bytes(out, ascii("moonbit test")), true)
+  @test.assert_eq(contains_bytes(out, iptc_payload()), false)
+  @test.assert_eq(
+    Bytes::from_array(span(out, out.length() - 8, out.length())),
+    Bytes::from_array(span(file, file.length() - 8, file.length())),
+  )
+  let (again, second) = @moonmeta.jpeg_drop_iptc(out) catch {
+    e => fail("second drop failed: \{e}")
+  }
+  @test.assert_eq(second, false)
+  @test.assert_eq(again, out)
+}
+
+///|
+/// 头差一个字节就是另一回事：不许按段号整段放行，也不许顺手摘掉。
+/// 这条钉的是"按前缀匹配"这个判据本身——改成"按段号放行"它就红。
+test "APP13 的头差一个字节：不许摘，但必须点名" {
+  let near_miss = with_nul("Photoshop 3.1")
+  let file = with_extra_seg(Some(fixture()), 0xed, near_miss) catch {
+    e => fail("build failed: \{e}")
+  }
+  let map = inspect_ok(file)
+  @test.assert_eq(map.has_iptc, false)
+  @test.assert_eq(map.unread.map(s => s.name()), ["COM", "APP13"])
+  let (out, dropped) = @moonmeta.jpeg_drop_iptc(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(dropped, false)
+  @test.assert_eq(out, file)
+}
+
+///|
+/// Adobe 的色彩管理包住在 APP14，头在名单上：不出声，但也不在摘除的射程里。
+/// 删它会把颜色改掉，而它一条隐私都不装。
+test "APP14 的 Adobe 包：安静，而且摘不掉" {
+  let adobe_cm = tag_payload("Adobe", [b'\x00', b'\x32', b'\x00'])
+  let file = with_extra_seg(Some(fixture()), 0xee, adobe_cm) catch {
+    e => fail("build failed: \{e}")
+  }
+  let map = inspect_ok(file)
+  @test.assert_eq(map.has_iptc, false)
+  @test.assert_eq(map.unread.map(s => s.name()), ["COM"])
+  let (a, d1) = @moonmeta.jpeg_drop_iptc(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  let (b, d2) = @moonmeta.jpeg_drop_xmp(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(d1, false)
+  @test.assert_eq(d2, false)
+  @test.assert_eq(a, file)
+  @test.assert_eq(b, file)
+}
+
+///|
+/// ICC 描述子是 APP2 的常见住户，公认不装元数据：不出声。
+/// 同一段号的 MPF（缩略图链，常自带坐标）必须点名。
+test "同一段号两种前缀：ICC 安静，MPF 出声" {
+  let icc = tag_payload("ICC_PROFILE", [b'\x01', b'\x01'])
+  let quiet = with_extra_seg(None, 0xe2, icc) catch {
+    e => fail("build failed: \{e}")
+  }
+  @test.assert_eq(inspect_ok(quiet).unread.map(s => s.name()), ["COM"])
+  let mpf = tag_payload("MPF", [b'\x00', b'\x00'])
+  let loud = with_extra_seg(None, 0xe2, mpf) catch {
+    e => fail("build failed: \{e}")
+  }
+  @test.assert_eq(inspect_ok(loud).unread.map(s => s.name()), ["COM", "APP2"])
+}
+
+///|
+/// APP0 是 JFIF 的家，但规范不禁止它装别的：一段以 `Exif\0\0` 开头的 APP0
+/// 不解析、不搬动，可它必须出现在未解析名单里——"段号看起来无害"不是理由。
+test "APP0 里藏一份 EXIF 头：不解析，但必须点名" {
+  let file = with_extra_seg(None, 0xe0, app1_payload(fixture())) catch {
+    e => fail("build failed: \{e}")
+  }
+  let map = inspect_ok(file)
+  @test.assert_eq(map.exif, None)
+  @test.assert_eq(map.unread.map(s => s.name()), ["COM", "APP0"])
+  let none = @moonmeta.jpeg_decode(file) catch {
+    e => fail("decode failed: \{e}")
+  }
+  @test.assert_eq(none, None)
+  // 不解析就不许声称删掉了：drop_iptc / drop_xmp 都不动它
+  let (kept, dropped) = @moonmeta.jpeg_drop_xmp(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(dropped, false)
+  @test.assert_eq(kept, file)
+}
+
+///|
+/// 分块扩展 XMP 与标准 XMP 是同一种东西的第二种拼法：只认前一种的话，
+/// Photoshop 写出来的那一批会静默漏网。
+test "分块扩展 XMP 也算 XMP：点名与摘除走同一条路" {
+  let file = with_extra_seg(Some(fixture()), 0xe1, xmp_ext_payload()) catch {
+    e => fail("build failed: \{e}")
+  }
+  let map = inspect_ok(file)
+  @test.assert_eq(map.has_xmp, true)
+  @test.assert_eq(map.xmp.length(), 1)
+  @test.assert_eq(map.exif != None, true)
+  @test.assert_eq(map.unread.map(s => s.name()), ["COM"])
+  let (out, dropped) = @moonmeta.jpeg_drop_xmp(file) catch {
+    e => fail("drop failed: \{e}")
+  }
+  @test.assert_eq(dropped, true)
+  @test.assert_eq(inspect_ok(out).has_xmp, false)
+  @test.assert_eq(decoded(out).gps.length(), 4)
+}
+
+///|
+/// 载体覆盖时 IPTC 与 XMP 一起走；不覆盖时必须留着并且报 false。
+/// 少一条腿都是假脱敏：CLI 缺省策略就是 privacy，它覆盖载体。
+test "carrier 覆盖与否决定 IPTC 走不走" {
+  let file = with_extra_seg(Some(fixture()), 0xed, iptc_payload()) catch {
+    e => fail("build failed: \{e}")
+  }
+  let (gone, r) = @moonmeta.jpeg_redact(file, @moonmeta.strict_policy()) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(r.dropped_iptc, true)
+  @test.assert_eq(inspect_ok(gone).has_iptc, false)
+  let (gone2, r2) = @moonmeta.jpeg_redact(file, @moonmeta.privacy_policy()) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(r2.dropped_iptc, true)
+  @test.assert_eq(inspect_ok(gone2).has_iptc, false)
+  let (kept, r3) = @moonmeta.jpeg_redact(file, @moonmeta.empty_policy()) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(r3.dropped_iptc, false)
+  @test.assert_eq(inspect_ok(kept).has_iptc, true)
+  @test.assert_eq(kept, file)
 }
 
 ///|

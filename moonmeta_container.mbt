@@ -115,11 +115,17 @@ fn check_tiff_rewrite(data : Bytes, block : TiffBlock) -> Unit raise MetaError {
 ///|
 /// 一次 `strip` 摘掉了什么。
 ///
-/// 两个 Bool 不能并成一个：只说"有东西被摘了"，就看不出 XMP 还在不在，
-/// 而这正是"摘干净"与"看着摘干净"的区别。
+/// 这几个 Bool 不能并成一个：只说"有东西被摘了"，就看不出 XMP 还在不在，
+/// 而这正是"摘干净"与"看着摘干净"的区别。IPTC 同理——它和 XMP 一样是
+/// 成包的副本，条目清单里看不见它。
 pub(all) struct Strip {
   had_exif : Bool
   dropped_xmp : Bool
+  /// APP13 里那包 Photoshop 资源（IPTC-IIM）有没有被整段摘掉。
+  ///
+  /// 只对 JPEG 容器可能为真：裸 TIFF 的 IPTC 是 IFD0 里的一条，
+  /// 清空目录时本来就没了；PNG 的那套走文本块，本库不解析也不摘。
+  dropped_iptc : Bool
 } derive(Debug, Eq)
 
 ///|
@@ -132,19 +138,25 @@ pub extend Strip with @debug.Debug::{to_repr}
 /// 把元数据整段摘掉（不是逐条目删），并报告原本有没有。
 ///
 /// 与 `redact_any` 的区别值得留在 API 里：`strip` 之后文件里不会再有
-/// 任何 EXIF 结构，也不会有 XMP 包；而 `redact` 之后仍是一份合法但精简过的 EXIF。
+/// 任何 EXIF 结构，也不会有 XMP 包与 Photoshop 资源包；而 `redact` 之后
+/// 仍是一份合法但精简过的 EXIF。
+///
+/// 这句承诺的范围要划清：`strip` 只负责我们认得的那几种成包载体。
+/// JPEG 里其余没解析的段（注释段、厂商私有 APP 段）原样留着，
+/// 由 `JpegMap::unread` 逐段点名——不解析的东西不声称删掉了。
 pub fn strip_any(data : Bytes) -> (Bytes, Strip) raise MetaError {
   match sniff(data) {
     None => raise UnknownFormat(0)
     Some(Jpeg) => {
       let (no_exif, had) = jpeg_remove_exif(data)
-      let (out, dropped) = jpeg_drop_xmp(no_exif)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      let (no_xmp, dropped) = jpeg_drop_xmp(no_exif)
+      let (out, dropped_iptc) = jpeg_drop_iptc(no_xmp)
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc, })
     }
     Some(Png) => {
       let (no_exif, had) = png_remove_exif(data)
       let (out, dropped) = png_drop_xmp(no_exif)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc: false, })
     }
     Some(Tiff) => {
       // 裸 TIFF 没有"容器"可拆：只能把每一类都清掉，剩下一个合法的空壳。
@@ -155,11 +167,13 @@ pub fn strip_any(data : Bytes) -> (Bytes, Strip) raise MetaError {
         block.gps.length() +
         block.interop.length()
       if left == 0 && !block.has_ifd1 {
-        (data, { had_exif: false, dropped_xmp: false, })
+        (data, { had_exif: false, dropped_xmp: false, dropped_iptc: false, })
       } else {
         check_tiff_rewrite(data, block)
         // 载体条目（XMP / Photoshop / IPTC-NAA）就在 IFD0 里，
         // 清空目录时一起没了，所以 dropped_xmp 只需要看有没有 0x02bc。
+        // IPTC 那两条也一样会没，但它本来就在逐条清单里看得见，
+        // 所以不必再开一个 Bool 重复交代。
         let had_carrier = find_entry(block.ifd0, 0x02bc) != None
         let emptied : TiffBlock = {
           little: block.little,
@@ -169,7 +183,10 @@ pub fn strip_any(data : Bytes) -> (Bytes, Strip) raise MetaError {
           interop: [],
           has_ifd1: false,
         }
-        (encode_tiff(emptied), { had_exif: true, dropped_xmp: had_carrier, })
+        (
+          encode_tiff(emptied),
+          { had_exif: true, dropped_xmp: had_carrier, dropped_iptc: false, },
+        )
       }
     }
   }

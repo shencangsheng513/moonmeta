@@ -8,7 +8,7 @@
 （默认策略该删什么、该留什么）同理：后者一整批格子在语料上一次都不命中
 也仍然全绿，所以它的双向门槛只能在这里钉。`strip_claims`（`strip` 那句话与
 文件事实的差集）也一样——语料里只会出现其中两种说法，写成"查个子串就放行"
-照样全绿，四态真值表得在这里摆全。
+照样全绿，三个载体各自的点名与"本来就没有"那一格得在这里摆全。
 
 这一轮再加四组：`TiffRefusalNumbers` / `TiffRefusalRecheck` / `TiffWalk` /
 `ReadRefusal`，钉的是**设计内拒绝的分类判据**。为什么语料抓不到它：那句拒绝里
@@ -21,6 +21,16 @@
 字节复核"在四批语料上一格都不命中（命中过一次的话，上一轮第二趟里那个未定义
 的名字早就炸了），所以它是那种"语料永远查不出来"的话——只能在这里钉：引擎那
 一句必须原样带出来，拿不到错误句时也不许崩。
+
+这一轮再加三组：`IptcFlag` / `UnreadItems` / `IptcResidue`，钉的是读侧新增的
+`iptc`、`unread` 两位与写侧的 IPTC 残留复核。语料在这里更帮不上忙：它只会告诉
+"命中时对不对"，永远不告诉"这一位被焊成恒 true（假警报）或恒 false（漏报）时
+能不能红"。特别是 PNG 与裸 TIFF 上 `iptc` **必须**是 false（那两种容器没有成包
+的 IPTC，报 true 就是无中生有）——语料里从来不会有这一格，因为它一次都不该命中。
+`unread` 同理：那一条清单的坏法是**编**（偏移指错、名字与段码对不上、同一份字节
+既算认出来又算没读懂），不是漏，编出来的东西在语料上只会以"全绿"的样子通过。
+"这些格子真能红"不由这一段话自证：它长在 `ci/mutations/mut_d9e.py` 里，每处坏法
+注入一次、要求红在指定用例上，跑完按字节还原并核对 sha。
 
 跑法（不需要语料，也不需要 moon）：
 
@@ -37,10 +47,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from crosscheck_real import (  # noqa: E402
     DIRS,
+    IPTC_HEAD,
+    IPTC_LISTED,
     TIFF_TYPE_SIZES,
     XMP_MARKS,
     gps_via_exif_pointer,
     forgive_disclosed_thumbnail,
+    iptc_flag_problems,
+    iptc_residue,
     jpeg_segments,
     metadata_block,
     metadata_signatures,
@@ -57,12 +71,21 @@ from crosscheck_real import (  # noqa: E402
     tiff_ifd0,
     tiff_refusal_numbers,
     tiff_refusal_problems,
+    unread_problems,
     xmp_flag_problems,
     xmp_injected,
     zero_length_entries,
 )
 
-URI = XMP_MARKS[0]  # JPEG APP1/XMP 的包标记
+URI = b"http://ns.adobe.com/xap/1.0/"  # JPEG APP1/XMP 的包标记
+# 这两份常量刻意写死字面量，不写 XMP_MARKS[i]：那是一份会长的名单，
+# 别人往里插一项，下标就静默改指另一个头，而这里每一格的断言都在指某个具体的头。
+PNG_KEYWORD = b"XML:com.adobe.xmp"  # PNG 靠这个 tEXt/iTXt 关键字认包
+for _mark in (URI, PNG_KEYWORD):
+    if _mark not in XMP_MARKS:
+        # 用 -O 跑也不许哑掉：这行是"这里的字面量与闸扫的表同源"的唯一凭据
+        raise SystemExit("selftest 的包标记 {!r} 已不在 XMP_MARKS 里".format(_mark))
+del _mark
 
 
 def doc_with(dir_name, entries):
@@ -175,9 +198,6 @@ class ZeroLength(unittest.TestCase):
         )
 
 
-PNG_KEYWORD = XMP_MARKS[1]  # PNG 靠这个 tEXt/iTXt 关键字认包
-
-
 class XmpFlag(unittest.TestCase):
     """`read --json` 的 `xmp` 键与原始字节的双向复核。
 
@@ -223,6 +243,233 @@ class XmpFlag(unittest.TestCase):
         self.assertEqual(
             xmp_flag_problems("tiff", URI + b"<x:xmpmeta>", False), []
         )
+
+    def test_只有分块扩展包也算有包(self):
+        # 语料里有这种文件：JPEG 里没有标准 URI，只有 extension 那一份。
+        # 走查认它，`xmp` 就是 true；闸若只扫标准 URI 会在这里产假红。
+        ext = b"http://ns.adobe.com/xmp/extension/"
+        self.assertEqual(xmp_flag_problems("jpeg", ext + b"\x00\x00\x00\x10", True), [])
+        problems = xmp_flag_problems("jpeg", ext + b"\x00\x00\x00\x10", False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("说在无", problems[0])
+
+
+class IptcFlag(unittest.TestCase):
+    """`read --json` 的 `iptc` 键与原始字节的双向复核（I17）。
+
+    为什么不能只靠语料：语料里 30 个 APP13 只会告诉"命中时对不对"，
+    不会告诉"这一位被写成恒 true / 恒 false 时能不能红"。特别是另一半：
+    PNG 与裸 TIFF 上这一位**必须**是 false——库里 PNG 的 IPTC 落在没解析的
+    文本块里（走 `unread`），裸 TIFF 落在 IFD 的一条上（走逐条清单），
+    在这两种容器上报 true 就是无中生有。
+    """
+
+    def test_说有且字节里真有_一致(self):
+        self.assertEqual(iptc_flag_problems("jpeg", IPTC_HEAD + b"\x1c\x02", True), [])
+
+    def test_说无且字节里真没有_一致(self):
+        self.assertEqual(iptc_flag_problems("jpeg", b"\xff\xd8\xff\xd9", False), [])
+
+    def test_字节里有却说无必须红(self):
+        problems = iptc_flag_problems("jpeg", IPTC_HEAD + b"\x1c\x02", False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("说在无", problems[0])
+
+    def test_字节里没有却说有必须红(self):
+        problems = iptc_flag_problems("jpeg", b"\xff\xd8\xff\xd9", True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("说在有", problems[0])
+
+    def test_差一个字节就不算包(self):
+        # "Photoshop 3.1" 这种近邻头在库里是"点名但不摘"，
+        # 判据若按前缀宽松匹配会把它算成包，闸就跟着库一起说瞎话。
+        near = b"Photoshop 3.1\x00" + b"\x1c\x02"
+        self.assertEqual(iptc_flag_problems("jpeg", near, False), [])
+        problems = iptc_flag_problems("jpeg", near, True)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("说在有", problems[0])
+
+    def test_PNG与裸TIFF不许报成包(self):
+        for kind in ("png", "tiff"):
+            with self.subTest(kind=kind):
+                self.assertEqual(iptc_flag_problems(kind, b"", False), [])
+                problems = iptc_flag_problems(kind, IPTC_HEAD, True)
+                self.assertEqual(len(problems), 1)
+                self.assertIn("没有成包的 IPTC", problems[0])
+
+    def test_连字节里有包也不改变png的结论(self):
+        # 这一格钉的是"分支顺序"：容器没有成包 IPTC 时，
+        # 判据不该先去搜字节再判，否则一个恰好含该字节的 PNG 会被说成"漏报"。
+        self.assertEqual(iptc_flag_problems("png", IPTC_HEAD + b"tEXt", False), [])
+
+    def test_键整个不见了也要出声(self):
+        # 三种容器都要出声，且先于容器分支：漏键比"该容器不判"更严重。
+        for kind in ("jpeg", "png", "tiff"):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    iptc_flag_problems(kind, b"", None),
+                    ["read --json 少了 iptc 键"],
+                )
+
+
+class UnreadItems(unittest.TestCase):
+    """`unread` 每一段的名字与偏移，都要在这个文件自己的字节上站得住（I18）。
+
+    这一栏是"我看见了但没读懂"的诚实账，它的问题不是漏而是编：
+    偏移指错、名字与段码对不上、同一份字节既算认出来又算没读懂——
+    三种都会在语料上一次不命中，只能在这里摆全。
+    """
+
+    def setUp(self):
+        # 偏移一律从段的实际长度算出来，不手打数字：手打错一位，
+        # 断言就会指着另一个字节，红得像"判据坏了"。
+        self.first = jpeg_app1(b"a comment", 0xFE)
+        self.second = jpeg_app1(b"body", 0xE0)
+        self.jpg = make_jpeg(self.first, self.second)
+        self.off2 = 2 + len(self.first)
+
+    def test_一句话说清三种坏法(self):
+        # 段首偏移指着那个 0xff：COM 在偏移 2，第二条在第一条之后。
+        self.assertEqual(unread_problems("jpeg", self.jpg, ["COM@2"]), [])
+        self.assertEqual(
+            unread_problems("jpeg", self.jpg, ["COM@2", "APP0@" + str(self.off2)]), []
+        )
+        png = make_png(png_chunk(b"acTL", b""))
+        self.assertEqual(unread_problems("png", png, ["acTL@8"]), [])
+
+    def test_偏移上不是段首(self):
+        # 6 落在第一条的载荷里（SOI 自己那份 0xff 在 0，会被读成段码不符）
+        problems = unread_problems("jpeg", self.jpg, ["COM@6"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("不是段首 0xff", problems[0])
+
+    def test_名字与段码对不上(self):
+        # 偏移指着那条 COM，名字却报 APP13：段码能算出来，一比对就露。
+        problems = unread_problems("jpeg", self.jpg, ["APP13@2"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("段码却是", problems[0])
+
+    def test_名字里没有偏移(self):
+        for item in ("COM", "COM@x", "COM@"):
+            with self.subTest(item=item):
+                problems = unread_problems("jpeg", self.jpg, [item])
+                self.assertEqual(len(problems), 1)
+                self.assertIn("读不出偏移", problems[0])
+
+    def test_不认识的段名(self):
+        problems = unread_problems("jpeg", self.jpg, ["SOS@2"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("名字不认识", problems[0])
+
+    def test_同一份字节不许报两遍(self):
+        # 一条 APP13 段，载荷却是 `Exif\0\0`：那既是要认出来的头、
+        # 又被挂进未解析段，说明两套分类在打架。
+        jpg = make_jpeg(jpeg_app1(b"Exif\x00\x00" + b"II", 0xED))
+        problems = unread_problems("jpeg", jpg, ["APP13@2"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("报了两遍", problems[0])
+
+    def test_png偏移上没有那个块类型(self):
+        png = make_png(png_chunk(b"acTL", b""))
+        problems = unread_problems("png", png, ["tEXt@8"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("没有这个类型", problems[0])
+
+    def test_裸TIFF有内容就是错(self):
+        block = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little")
+        self.assertEqual(unread_problems("tiff", block, []), [])
+        problems = unread_problems("tiff", block, ["COM@2"])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("不该报出未解析段", problems[0])
+
+    def test_键整个不见了(self):
+        self.assertEqual(
+            unread_problems("jpeg", b"\xff\xd8", None),
+            ["read --json 少了 unread 键"],
+        )
+
+    def test_一段坏不掩盖另一段坏(self):
+        # 计数口径：多条里每条各算一条，不许 return 掉第一条就完事。
+        # 中间那条 COM@2 是对的，不能被邻居带跑。
+        problems = unread_problems(
+            "jpeg", self.jpg, ["COM@6", "COM@2", "APP13@" + str(self.off2)]
+        )
+        self.assertEqual(len(problems), 2)
+        self.assertIn("不是段首 0xff", problems[0])
+        self.assertIn("段码却是", problems[1])
+
+
+class IptcResidue(unittest.TestCase):
+    """写侧的 IPTC 残留复核（I19）：产物字节说了算，披露说了没说也要分得开。
+
+    这五格在语料上只会以"摘净了"的形式出现（30 个 APP13 文件），
+    剩下四种坏法——残留还红、摘净了不说、源本来没有、两趟抢同一个分母——
+    一次都不命中，只能在这里造文件钉。
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(self.dir), ignore_errors=True)
+        self.src = IPTC_HEAD + b"\x1c\x02\x00\x0e" + URI
+
+    def write(self, name, blob):
+        dst = self.dir / name
+        dst.write_bytes(blob)
+        return dst
+
+    def test_产物里还有包就红_说什么都不算(self):
+        dst = self.write("dirty.jpg", self.src)
+        stats = {}
+        res = iptc_residue(dst, self.src, "IPTC 包已摘除", stats, policy="strict")
+        self.assertEqual(len(res), 1)
+        self.assertIn("还有 IPTC/Photoshop 包", res[0])
+        self.assertEqual(stats, {})
+
+    def test_摘净且披露_只加摘除计数(self):
+        dst = self.write("clean.jpg", b"\xff\xd8\xff\xd9")
+        stats = {}
+        res = iptc_residue(dst, self.src, "IPTC 包已摘除", stats)
+        self.assertEqual(res, [])
+        self.assertEqual(stats, {"iptc_dropped": 1})
+
+    def test_摘净却没披露必须红(self):
+        dst = self.write("silent.jpg", b"\xff\xd8\xff\xd9")
+        res = iptc_residue(dst, self.src, "EXIF 已摘除", {})
+        self.assertEqual(len(res), 1)
+        self.assertIn("没有披露", res[0])
+
+    def test_源本来没有包_既不红也不记账(self):
+        # 没有的东西不必披露；把这一格算进"摘除 N 个"就是凭空涨分母。
+        dst = self.write("plain.jpg", b"\xff\xd8\xff\xd9")
+        stats = {}
+        res = iptc_residue(dst, b"\xff\xd8\xff\xd9", "", stats)
+        self.assertEqual(res, [])
+        self.assertEqual(stats, {})
+
+    def test_两趟各记各的键且都不碰redacted(self):
+        # 与 xmp_residue 的刻意不同处：`redacted` 那个分母已由 XMP 那一趟加过，
+        # 这里再加一次，"产物复查 N 个"就成了一个文件数两遍。
+        dst = self.write("clean2.jpg", b"\xff\xd8\xff\xd9")
+        stats = {"redacted": 1, "redacted_privacy": 1}
+        self.assertEqual(
+            iptc_residue(dst, self.src, "IPTC 包已摘除", stats, policy="privacy"), []
+        )
+        self.assertEqual(stats["redacted"], 1)
+        self.assertEqual(stats["redacted_privacy"], 1)
+        self.assertEqual(stats["iptc_dropped"], 1)
+        self.assertNotIn("iptc_dropped_privacy", stats)
+        self.assertEqual(
+            iptc_residue(
+                dst,
+                self.src,
+                "IPTC 包已摘除",
+                stats,
+                policy="privacy",
+                dropped_key="iptc_dropped_privacy",
+            ),
+            [],
+        )
+        self.assertEqual(stats["iptc_dropped_privacy"], 1)
 
 
 class GpsNested(unittest.TestCase):
@@ -364,24 +611,36 @@ class OutDirNesting(unittest.TestCase):
         self.assertFalse(out_dir_inside_corpus(self.corpus, self.root))
 
 
-# CLI 的三句原话，逐字抄在这里当量尺：改了措辞要先红在这组用例里
-# （cmd/main 的 strip_said 那边也有一条同名断言）。
+# CLI 的原话，逐字抄在这里当量尺：点是哪几样由 main.mbt 的 `strip_parts` 决定
+# （分隔符是 ","，句号收尾）。改了措辞要先红在这组用例里
+# （cmd/main 的 strip_said / inplace_strip_said 那边也各有同名断言）。
 SAID_BOTH = "元数据已整段摘除：EXIF,XMP 包。\n已写出 out.jpg"
 SAID_EXIF = "元数据已整段摘除：EXIF。\n已写出 out.jpg"
 SAID_XMP = "元数据已整段摘除：XMP 包。\n已写出 out.png"
-SAID_NONE = "这个文件本来就没有 EXIF，也没有 XMP 包。\n已写出 out.jpg"
+SAID_ALL = "元数据已整段摘除：EXIF,XMP 包,IPTC/Photoshop 包。\n已写出 out.jpg"
+SAID_IPTC = "元数据已整段摘除：IPTC/Photoshop 包。\n已写出 out.jpg"
+SAID_NONE = (
+    "这个文件本来就没有 EXIF，也没有 XMP 包与 IPTC 包。\n已写出 out.jpg"
+)
 
 
 class StripClaims(unittest.TestCase):
-    """strip 那句话与文件事实之间的判据：四态真值表。
+    """strip 那句话与文件事实之间的判据：三个载体的真值表。
 
-    这一关在语料上只命中两种（两个载体都有、只有 XMP），其余靠这里钉：
-    判据一旦写松（比如退化成 `"EXIF" in output` 的子串查找），
-    全绿的跑批查不出来，这组用例能。
+    这一关在语料上只命中几种（两个载体都有、只有 XMP……），"只有 IPTC"与
+    "三样都有"要靠这里钉：判据一旦写松（比如退化成 `"EXIF" in output`
+    的子串查找），全绿的跑批查不出来，这组用例能。
     """
 
     def test_两样都摘了两样都说了_不报(self):
         self.assertEqual(strip_claims(SAID_BOTH, True, True), [])
+
+    def test_三样都摘了三样都说了_不报(self):
+        # IPTC 那一格在语料上是活的：30 个带 APP13 的文件走 strip
+        self.assertEqual(strip_claims(SAID_ALL, True, True, True), [])
+
+    def test_只有IPTC的文件只点名IPTC_不报(self):
+        self.assertEqual(strip_claims(SAID_IPTC, False, False, True), [])
 
     def test_只有XMP的文件不提EXIF_不报(self):
         # had_exif=false 时那句只点名 XMP 包，这是实话
@@ -389,6 +648,10 @@ class StripClaims(unittest.TestCase):
 
     def test_两样都没有_承认没有就不报(self):
         self.assertEqual(strip_claims(SAID_NONE, False, False), [])
+
+    def test_三样都没有_承认没有就不报(self):
+        # 与上一格同句：那句否定话同时覆盖三个载体，多一个参数不改变结论
+        self.assertEqual(strip_claims(SAID_NONE, False, False, False), [])
 
     def test_有EXIF却没点名(self):
         res = strip_claims(SAID_XMP, True, False)
@@ -404,26 +667,49 @@ class StripClaims(unittest.TestCase):
             ["源文件带着 XMP 包，strip 却没有交代摘除它"],
         )
 
+    def test_有IPTC包却没点名(self):
+        # 这一格就是 D9-E 的原始病灶：SAID_BOTH 点名了两样、独独漏 IPTC，
+        # 只要判据不数第三个载体，它就一路绿。
+        res = strip_claims(SAID_BOTH, True, True, True)
+        self.assertEqual(
+            res, ["源文件带着 IPTC/Photoshop 包，strip 却没有交代摘除它"]
+        )
+
     def test_明明有却说本来就没有(self):
-        # 这一格就是子串判据的陷阱：SAID_NONE 里 EXIF 和 XMP 两个词都在，
+        # 这一格就是子串判据的陷阱：SAID_NONE 里 EXIF、XMP、IPTC 三个词都在，
         # 查子串会以为"说了"，查点名的载体才看得出它什么都没说。
-        res = strip_claims(SAID_NONE, True, True)
+        res = strip_claims(SAID_NONE, True, True, True)
         self.assertEqual(
             [n for n in res if "本来就没有" in n],
             ["源文件有元数据，strip 却说这个文件本来就没有"],
         )
-        self.assertEqual(len(res), 3)  # 两个载体各一条 + 谎说没有一条
+        self.assertEqual(len(res), 4)  # 三个载体各一条 + 谎说没有一条
 
-    def test_两样都没有却说摘了东西(self):
-        res = strip_claims(SAID_EXIF, False, False)
+    def test_三样都没有却说摘了东西(self):
+        res = strip_claims(SAID_EXIF, False, False, False)
         self.assertEqual(
-            res, ["源文件 EXIF 与 XMP 两样都没有，strip 却说摘除了东西"]
+            res,
+            ["源文件 EXIF、XMP 包、IPTC 包三样都没有，strip 却说摘除了东西"],
+        )
+
+    def test_有IPTC却说三样都没有(self):
+        # 与"谎说没有"同一分支，但只由 IPTC 触发：另两位都是 False。
+        # 少了这一格，`had_exif or had_xmp or had_iptc` 少写一项照样全绿。
+        res = strip_claims(SAID_NONE, False, False, True)
+        self.assertEqual(
+            sorted(res),
+            sorted(
+                [
+                    "源文件带着 IPTC/Photoshop 包，strip 却没有交代摘除它",
+                    "源文件有元数据，strip 却说这个文件本来就没有",
+                ]
+            ),
         )
 
     def test_两种说法都不是_也算没交代(self):
-        # 前缀换掉、否定句也没有：两个载体各算一条"没点名"
-        res = strip_claims("清完了。\n已写出 out.jpg", True, True)
-        self.assertEqual(len(res), 2)
+        # 前缀换掉、否定句也没有：三个载体各算一条"没点名"
+        res = strip_claims("清完了。\n已写出 out.jpg", True, True, True)
+        self.assertEqual(len(res), 3)
 
 
 # 设计内拒绝的复核。句子措辞不是这里编的：那十一句由

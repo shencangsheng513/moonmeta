@@ -107,9 +107,10 @@ You can browse and install extra skills here:
 
 | 命令 | 判据 |
 | --- | --- |
-| `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran 112 tests` / `OK`） |
+| `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran N tests` / `OK`；N 以当回合输出为准，最近一次实测 141） |
 | `python ci/inplace_crosscheck.py --selftest` | 原位门禁自己有没有眼睛（逐格 OK + 收尾"通过"） |
 | `python ci/mutations/run_all.py --selftest` | 变异判定器真值表（收尾"判定器真值表：N 格，错 0 格"） |
+| `python ci/mutations/mut_d9e.py` | 语料闸那三判据的区分度（16 处注入各处红一次；纯 python，不要语料也不要 moon） |
 | `python ci/replay_cli.py --check-only` | CI 的 `cli` 作业步骤/命令行清单对账（两个口径必须一致） |
 
 全量变异集是 `python ci/mutations/run_all.py`（要语料在位、串行、跑完 `git status --porcelain`

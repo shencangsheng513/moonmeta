@@ -33,6 +33,45 @@ let xmp_keyword : Array[Byte] = [
 ]
 
 ///|
+/// 文本块：块里是人写的文字，不是图像参数。
+///
+/// 为什么单独列：真实语料里 `tEXt` 的关键字有 `date:create`、`date:modify`、
+/// `icc:copyright` 这些——它们不归 IFD 管，逐条清单看不见，
+/// 而"EXIF 删干净了"这句话对它们一句都没说。
+let chunk_ztext : Array[Byte] = [b'z', b'T', b'X', b't']
+
+///|
+let text_chunk_kinds : Array[Array[Byte]] = [
+  chunk_text, chunk_iext, chunk_ztext,
+]
+
+///|
+/// 公认"不装元数据"的块：结构与图像参数。它们不出声。
+///
+/// 和 JPEG 那份 `structural_heads` 同一条判据——白名单只收参数类，
+/// 不收"看起来应该没事"。所以 `tIME`（文件最后修改时间）不在这里，
+/// APNG 的 `acTL`/`fcTL` 也不在：那些我们没读，也没打算删。
+let png_structural_kinds : Array[Array[Byte]] = [
+  [b'I', b'H', b'D', b'R'],
+  [b'P', b'L', b'T', b'E'],
+  [b'I', b'D', b'A', b'T'],
+  [b'I', b'E', b'N', b'D'],
+  [b'g', b'A', b'M', b'A'],
+  [b'c', b'H', b'R', b'M'],
+  [b's', b'R', b'G', b'B'],
+  [b'i', b'C', b'C', b'P'],
+  [b'p', b'H', b'Y', b's'],
+  [b'b', b'K', b'G', b'D'],
+  [b't', b'R', b'N', b'S'],
+  [b's', b'B', b'I', b'T'],
+  [b'h', b'I', b'S', b'T'],
+  [b'o', b'F', b'F', b's'],
+  [b'p', b'C', b'A', b'L'],
+  [b's', b'P', b'L', b'T'],
+  chunk_exif,
+]
+
+///|
 /// 一个 PNG 块：类型、起始偏移、载荷字节数（不含长度域、类型和校验和）。
 pub(all) struct PngChunk {
   kind : String
@@ -52,6 +91,12 @@ pub(all) struct PngMap {
   chunks : Array[PngChunk]
   exif : (Int, Int)?
   has_xmp : Bool
+  /// 我们既没读、也不会删的块：逐块点名。
+  ///
+  /// 与 JPEG 的 `unread` 同一条判据：文本块与非白名单块都算，
+  /// 白名单只收结构与图像参数。这一项为空的 PNG，才是
+  /// "除 eXIf 与 XMP 之外没有别的地方藏东西"。
+  unread : Array[PngChunk]
 } derive(Debug, Eq)
 
 ///|
@@ -70,6 +115,7 @@ pub fn png_inspect(data : Bytes) -> PngMap raise MetaError {
     }
   }
   let chunks : Array[PngChunk] = []
+  let unread : Array[PngChunk] = []
   let mut exif : (Int, Int)? = None
   let mut has_xmp = false
   let mut p = 8
@@ -88,6 +134,7 @@ pub fn png_inspect(data : Bytes) -> PngMap raise MetaError {
     let len = declared.to_int()
     let body = p + 4
     let end = body + len + 8
+    let chunk = { kind: chunk_kind(data, body), offset: here, length: len, }
     if kind_is(data, body, chunk_exif) {
       verify_crc(data, here, body, len)
       match exif {
@@ -96,14 +143,40 @@ pub fn png_inspect(data : Bytes) -> PngMap raise MetaError {
       }
     } else if has_xmp_keyword(data, body, len) {
       has_xmp = true
+    } else if unread_chunk_kind(data, body) {
+      unread.push(chunk)
     }
-    chunks.push({ kind: chunk_kind(data, body), offset: here, length: len, })
+    chunks.push(chunk)
     if kind_is(data, body, chunk_iend) {
       done = true
     }
     p = end
   }
-  { chunks, exif, has_xmp, }
+  { chunks, exif, has_xmp, unread, }
+}
+
+///|
+/// 这个块类型是不是"我们没读、又不敢担保不装元数据"的那一类。
+///
+/// 文本块一律算（带 XMP 关键字的那一支在上面已经被拦走了，走到这里的
+/// 就是别的文字：`date:create`、`Copyright` 都在这支队伍里）。
+/// 其余块只有白名单上的才算读过了——白名单外的一律点名。
+fn unread_chunk_kind(data : Bytes, at : Int) -> Bool {
+  if one_of(data, at, text_chunk_kinds) {
+    true
+  } else {
+    !one_of(data, at, png_structural_kinds)
+  }
+}
+
+///|
+fn one_of(data : Bytes, at : Int, kinds : Array[Array[Byte]]) -> Bool {
+  for kind in kinds {
+    if starts_with(data, at, kind) {
+      return true
+    }
+  }
+  false
 }
 
 ///|
@@ -274,7 +347,15 @@ pub fn png_redact(
   let map = png_inspect(data)
   let (out, report) = match map.exif {
     None =>
-      (data, { removed: [], dropped_thumbnail: false, dropped_xmp: false, })
+      (
+        data,
+        {
+          removed: [],
+          dropped_thumbnail: false,
+          dropped_xmp: false,
+          dropped_iptc: false,
+        },
+      )
     Some((s, e)) => {
       let block = decode_tiff(slice_bytes(data, s, e))
       let (kept, report) = block.redact(p)
@@ -292,7 +373,9 @@ pub fn png_redact(
     (out, report)
   } else {
     let (out2, dropped) = png_drop_xmp(out)
-    (out2, { ..report, dropped_xmp: dropped, })
+    // dropped_iptc 在 PNG 这边永远是 false：那套 IPTC 住在 `Raw profile type iptc`
+    // 文本块里，本库不解析它，只把它点名进 `unread`。不解析的东西不许报"已摘除"。
+    (out2, { ..report, dropped_xmp: dropped, dropped_iptc: false, })
   }
 }
 
@@ -319,7 +402,11 @@ pub fn PngMap::describe(self : PngMap) -> String {
     head = head + " \{c.kind}@\{c.offset}(\{c.length}B)"
   }
   if self.has_xmp {
-    head + " ; 另含 XMP 文本块"
+    head = head + " ; 另含 XMP 文本块"
+  }
+  if !self.unread.is_empty() {
+    let names = self.unread.map(c => "\{c.kind}@\{c.offset}").join(" ")
+    head + " ; 未解析块 \{self.unread.length()} 块：\{names}"
   } else {
     head
   }

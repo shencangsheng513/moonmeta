@@ -254,16 +254,55 @@ fn io_text(e : @fs.IOError) -> String {
 }
 
 ///|
-/// 容器里另有一包 XMP 吗？
+/// 容器层面"逐条清单装不下"的那几件事，一次走查取回。
 ///
-/// 这件事没法从 `findings` 里看出来：XMP 不是一条 IFD 条目，逐条清单天然装不下它。
-/// 而"清单是空的"与"该删的都删了"在脱敏工具里是两个完全不同的结论。
-fn carrier_present(data : Bytes, kind : @lib.Kind) -> Bool {
+/// `xmp`/`iptc` 是成包的副本，策略覆盖载体时会被整包摘除；
+/// `unread` 是我们既读不了也不会删的段/块。三种状态各有各的一句话，
+/// 都不能从 `findings` 的长度推出来——那正是"报告上一切正常、实际什么都没脱"
+/// 那种事故的形状。
+struct Notes {
+  xmp : Bool
+  iptc : Bool
+  unread : Array[String]
+}
+
+///|
+fn empty_notes() -> Notes {
+  { xmp: false, iptc: false, unread: [], }
+}
+
+///|
+/// 容器里另有一包 XMP / IPTC 吗？还有哪些段/块是我们没解析的？
+fn notes_of(data : Bytes, kind : @lib.Kind) -> Notes {
   match kind {
-    @lib.Jpeg => @lib.jpeg_inspect(data).has_xmp catch { _ => false }
-    @lib.Png => @lib.png_inspect(data).has_xmp catch { _ => false }
-    // 裸 TIFF 的 XMP 是 IFD0 里的一条（0x02bc），逐条清单本来就看得见它。
-    @lib.Tiff => false
+    @lib.Jpeg =>
+      try @lib.jpeg_inspect(data) catch {
+        // 走查失败的文件在调用方那一侧本来就要报错，这里不额外发明第二套说法。
+        _ => empty_notes()
+      } noraise {
+        m =>
+          {
+            xmp: m.has_xmp,
+            iptc: m.has_iptc,
+            unread: m.unread.map(s => "\{s.name()}@\{s.offset}"),
+          }
+      }
+    @lib.Png =>
+      try @lib.png_inspect(data) catch {
+        _ => empty_notes()
+      } noraise {
+        m =>
+          {
+            xmp: m.has_xmp,
+            // PNG 侧没有"成包的 IPTC"可摘：那套住在 Raw profile 文本块里，
+            // 本库不解析它，它会以 `tEXt@偏移` 的形式出现在 unread 里。
+            iptc: false,
+            unread: m.unread.map(c => "\{c.kind}@\{c.offset}"),
+          }
+      }
+    // 裸 TIFF 的 XMP / IPTC 都是 IFD0 里的一条（0x02bc / 0x83bb），
+    // 逐条清单本来就看得见它们，所以这里不再重复交代一遍。
+    @lib.Tiff => empty_notes()
   }
 }
 
@@ -275,46 +314,51 @@ fn dispatch(
   block : @lib.TiffBlock?,
   p : @lib.Policy,
 ) -> Int {
-  let xmp = carrier_present(data, kind)
+  let notes = notes_of(data, kind)
   let mode = write_mode(req, kind, has_chain(block))
   match req.action {
     Read =>
       if req.json {
-        println(read_json(req.path, kind, block, xmp))
+        println(read_json(req.path, kind, block, notes))
         0
       } else {
-        show_read(req.path, kind, block, xmp)
+        show_read(req.path, kind, block, notes)
       }
     Audit =>
       if req.json {
-        println(audit_json(req.path, req.policy, block, p, xmp))
+        println(audit_json(req.path, req.policy, block, p, notes))
         0
       } else {
-        show_audit(req.path, req.policy, block, p, xmp)
+        show_audit(req.path, req.policy, block, p, notes)
       }
-    Redact => redact_file(req, data, mode, p, xmp)
+    Redact => redact_file(req, data, mode, p, notes)
     Strip => strip_file(req, data, mode)
   }
 }
 
 ///|
 /// `read --json` 的形状（键序固定，便于逐字节比对）：
-/// {"file":..,"container":..,"xmp":false,"exif":false}
+/// {"file":..,"container":..,"xmp":false,"iptc":false,"unread":[],"exif":false}
 /// 有 EXIF 时再给 byte_order / directories / has_ifd1 / gps。
-/// `xmp` 与 text 输出里那句"另含 XMP 包"是同一件事：机器读者不该比人拿到的更少。
+/// `xmp`/`iptc`/`unread` 与 text 输出里那几句"另含…包""未解析段…"是同一件事：
+/// 机器读者不该比人拿到的更少。
 /// 坐标以字符串给出：`Double` 可能打印成非有限值，那会把整行 JSON 变成非法的。
 fn read_json(
   path : String,
   kind : @lib.Kind,
   block : @lib.TiffBlock?,
-  xmp : Bool,
+  notes : Notes,
 ) -> String {
   let head = "{\"file\":" +
     json_str(path) +
     ",\"container\":" +
     json_str(kind_name(kind)) +
     ",\"xmp\":" +
-    bool_json(xmp)
+    bool_json(notes.xmp) +
+    ",\"iptc\":" +
+    bool_json(notes.iptc) +
+    ",\"unread\":" +
+    arr_json(notes.unread)
   match block {
     None => head + ",\"exif\":false}"
     Some(b) =>
@@ -405,12 +449,19 @@ fn bool_json(b : Bool) -> String {
 }
 
 ///|
+/// 字符串数组转 JSON 数组。每个元素都过 `json_str`：段名里也可能有非 ASCII，
+/// 直接拼会把一整行 JSON 变成非法的。
+fn arr_json(items : Array[String]) -> String {
+  "[" + join_comma(items.map(s => json_str(s))) + "]"
+}
+
+///|
 fn audit_json(
   path : String,
   name : String,
   block : @lib.TiffBlock?,
   p : @lib.Policy,
-  xmp : Bool,
+  notes : Notes,
 ) -> String {
   let found : Array[@lib.Removed] = match block {
     None => []
@@ -430,14 +481,19 @@ fn audit_json(
       "}",
     )
   }
-  // "xmp" 是给机器读的那句"这里还有一整包，findings 装不下"。
-  // 少了它，findings 为空既可能是"没有敏感东西"，也可能是"敏感东西在策略管不到的包里"。
+  // "xmp"/"iptc"/"unread" 是给机器读的那句"这里还有 findings 装不下的东西"。
+  // 少了它们，findings 为空就分不清三种状态："没有敏感东西"、
+  // "敏感东西在策略管不到的包里"、"在我们不读也不删的那些段里"。
   "{\"file\":" +
   json_str(path) +
   ",\"policy\":" +
   json_str(name) +
   ",\"xmp\":" +
-  bool_json(xmp) +
+  bool_json(notes.xmp) +
+  ",\"iptc\":" +
+  bool_json(notes.iptc) +
+  ",\"unread\":" +
+  arr_json(notes.unread) +
   ",\"exif\":" +
   bool_json(block != None) +
   ",\"findings\":[" +
@@ -500,13 +556,15 @@ fn show_read(
   path : String,
   kind : @lib.Kind,
   block : @lib.TiffBlock?,
-  xmp : Bool,
+  notes : Notes,
 ) -> Int {
   println("\{path}：\{kind.to_string()}")
   match block {
     None => {
       println("  这个文件里没有 EXIF。")
-      print_if(xmp, read_xmp_note(false))
+      print_if(notes.xmp, read_xmp_note(false))
+      print_if(notes.iptc, read_iptc_note(false))
+      print_unread(notes)
       0
     }
     Some(b) => {
@@ -527,7 +585,9 @@ fn show_read(
       print_line(
         "  相机：\{or_else(b.make(), "?")} \{or_else(b.model(), "?")}",
       )
-      print_if(xmp, read_xmp_note(true))
+      print_if(notes.xmp, read_xmp_note(true))
+      print_if(notes.iptc, read_iptc_note(true))
+      print_unread(notes)
       0
     }
   }
@@ -541,6 +601,31 @@ fn read_xmp_note(has_exif : Bool) -> String {
     "  另含 XMP 包：read 不摊开它，逐条清单里也永远不会出现它。"
   } else {
     "  但容器里另有一包 XMP：read 只摊开 EXIF 目录，包里的东西用 audit 看。"
+  }
+}
+
+///|
+/// IPTC/Photoshop 包的同构那一句。
+///
+/// 不能省也不能和 XMP 混成一句：两者在写侧是同一条待遇（策略覆盖载体时都整包摘），
+/// 但读侧是两个不同的包，只报一个就等于另一半没说。
+fn read_iptc_note(has_exif : Bool) -> String {
+  if has_exif {
+    "  另含 IPTC/Photoshop 包：read 不摊开它，逐条清单里也永远不会出现它。"
+  } else {
+    "  但容器里另有一包 IPTC/Photoshop：read 只摊开 EXIF 目录，包里的东西用 audit 看。"
+  }
+}
+
+///|
+/// 我们没解析、也不会删的那些段/块，逐件点名。
+///
+/// 这一句是"未解析"三个字的兑现：不点名，用户看到"删除 0 条"就以为整个文件干净了。
+fn print_unread(notes : Notes) -> Unit {
+  if !notes.unread.is_empty() {
+    println(
+      "  未解析段 \{notes.unread.length()} 段（本库不读也不删）：\{join_comma(notes.unread)}",
+    )
   }
 }
 
@@ -572,12 +657,14 @@ fn show_audit(
   name : String,
   block : @lib.TiffBlock?,
   p : @lib.Policy,
-  xmp : Bool,
+  notes : Notes,
 ) -> Int {
   match block {
     None => {
       println("\{path}: 没有 EXIF，无需脱敏。")
-      print_if(xmp, carrier_note(p))
+      print_if(notes.xmp, carrier_note(p))
+      print_if(notes.iptc, iptc_carrier_note(p))
+      print_unread(notes)
       0
     }
     Some(b) => {
@@ -588,7 +675,9 @@ fn show_audit(
           "  \{r.dir.label()}/\{r.name} (\{hex_tag(r.tag)}) → \{r.category.label()}",
         )
       }
-      print_if(xmp, carrier_note(p))
+      print_if(notes.xmp, carrier_note(p))
+      print_if(notes.iptc, iptc_carrier_note(p))
+      print_unread(notes)
       0
     }
   }
@@ -607,12 +696,22 @@ fn carrier_note(p : @lib.Policy) -> String {
 }
 
 ///|
+/// IPTC/Photoshop 包的同构那一句：写侧与 XMP 同一条待遇，所以两种状态都要说。
+fn iptc_carrier_note(p : @lib.Policy) -> String {
+  if p.covers(@lib.Carrier) {
+    "另含 IPTC/Photoshop 包：逐条清单里看不到它；策略覆盖载体，会整包摘除。"
+  } else {
+    "警告：另含 IPTC/Photoshop 包，当前策略不碰它。署名、版权与联系人常就在这包里。"
+  }
+}
+
+///|
 fn redact_file(
   req : Request,
   data : Bytes,
   mode : WriteMode,
   p : @lib.Policy,
-  xmp : Bool,
+  notes : Notes,
 ) -> Int {
   let (bytes, report) = redact_by(data, mode, p) catch {
     e => {
@@ -625,8 +724,9 @@ fn redact_file(
   }
   let n = report.removed.length()
   println(
-    "删除 \{n} 条\{thumbnail_note(report.dropped_thumbnail)}\{xmp_note(xmp, report.dropped_xmp)}。",
+    "删除 \{n} 条\{thumbnail_note(report.dropped_thumbnail)}\{xmp_note(notes.xmp, report.dropped_xmp)}\{iptc_note(notes.iptc, report.dropped_iptc)}。",
   )
+  print_unread(notes)
   write_result(req, bytes)
 }
 
@@ -723,6 +823,19 @@ fn xmp_note(present : Bool, dropped : Bool) -> String {
 }
 
 ///|
+/// IPTC/Photoshop 包的同一段话。形状与 `xmp_note` 一模一样，但不共用函数：
+/// 两句话要各自被测试逐字钉住，合并成一句参数的版本会让其中一格失去落点。
+fn iptc_note(present : Bool, dropped : Bool) -> String {
+  if dropped {
+    "，并整包摘除 IPTC/Photoshop 包"
+  } else if present {
+    "；警告：IPTC/Photoshop 包还在，当前策略不碰它"
+  } else {
+    ""
+  }
+}
+
+///|
 /// 缩略图必须单独交代：它常自带一份 GPS，"删了主坐标却留着缩略图"
 /// 是最常见的假脱敏。
 fn thumbnail_note(dropped : Bool) -> String {
@@ -768,7 +881,7 @@ fn inplace_mode(mode : WriteMode) -> Bool {
 /// 不是从计划里抄：抄来的数只说明我们打算留什么。
 fn inplace_strip_said(had : @lib.Strip, out : Bytes) -> String {
   let kept = kept_image_entries(out)
-  let head = if had.had_exif || had.dropped_xmp {
+  let head = if had.had_exif || had.dropped_xmp || had.dropped_iptc {
     "原位摘除非解码条目：" + join_comma(strip_parts(had)) + "。"
   } else {
     "这个文件的 IFD0 里没有不参与解码的条目，一个字节都没改。"
@@ -800,11 +913,11 @@ fn kept_image_entries(out : Bytes) -> Int {
 /// 所以四个状态各有一句、且都不许多说。
 fn strip_said(had : @lib.Strip) -> String {
   // "本来就没有"和"已清除"是两回事；说错这一句，整个工具就没人敢信了。
-  // 两件事分开说：EXIF 摘干净而 XMP 留着，不叫摘干净。
-  if had.had_exif || had.dropped_xmp {
+  // 三件事分开说：EXIF 摘干净而 XMP 或 IPTC 留着，都不叫摘干净。
+  if had.had_exif || had.dropped_xmp || had.dropped_iptc {
     "元数据已整段摘除：" + join_comma(strip_parts(had)) + "。"
   } else {
-    "这个文件本来就没有 EXIF，也没有 XMP 包。"
+    "这个文件本来就没有 EXIF，也没有 XMP 包与 IPTC 包。"
   }
 }
 
@@ -816,6 +929,9 @@ fn strip_parts(had : @lib.Strip) -> Array[String] {
   }
   if had.dropped_xmp {
     parts.push("XMP 包")
+  }
+  if had.dropped_iptc {
+    parts.push("IPTC/Photoshop 包")
   }
   parts
 }
