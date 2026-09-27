@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # 两个名字都列上不是保险习惯，是实测：本仓库当前分支叫 master（`git branch
+    # --show-current` 今天实跑），只写 main 的话推上去这个工作流一条都不会跑，
+    # 而"CI 绿了"这句话看起来完全成立。将来改名成 main 也不用再动这个文件。
+    branches: [main, master]
   pull_request:
 
 jobs:
