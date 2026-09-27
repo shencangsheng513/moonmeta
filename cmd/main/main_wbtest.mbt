@@ -460,8 +460,9 @@ test "旗标 + 容器 + 链：三者齐了才走原位" {
 }
 
 ///|
-/// 那句承诺的两个分支各说什么：有链要说清"不碰它、里面可能另有一份坐标、
-/// 要连它一起清就别加旗标"；没链不许冒认"链还在"。
+/// 那句承诺的两个分支各说什么：有链要说清"不碰它、里面可能另有一份坐标"，
+/// 并且把另一条路的**前提**一起说出来（它要求整份文件逐字节重建得了），
+/// 不许再指向一条对本类文件必然拒绝的出路；没链不许冒认"链还在"。
 test "原位承诺：长度与链，两种说法都不许多承诺" {
   let with_chain = inplace_said(97123, true)
   let no_chain = inplace_said(97123, false)
@@ -469,10 +470,15 @@ test "原位承诺：长度与链，两种说法都不许多承诺" {
   assert_true(no_chain.contains("文件长度不变（97123 字节"))
   assert_true(with_chain.contains("还有一条缩略图目录链"))
   assert_true(with_chain.contains("里面可能另有一份坐标"))
-  assert_true(with_chain.contains("别加 --keep-bytes"))
+  assert_true(with_chain.contains("只能走不带 --keep-bytes 的那条路"))
+  assert_true(with_chain.contains("要求整份文件能被逐字节重建"))
+  assert_true(with_chain.contains("两条路都清不到链里这一份"))
+  // 这句是被撤掉的旧承诺：它让用户去走一条对陌生裸 TIFF 至今 0 放行的路。
+  assert_true(!with_chain.contains("就别加 --keep-bytes"))
   assert_true(no_chain.contains("没有缩略图目录链"))
   assert_true(!no_chain.contains("还有一条缩略图目录链"))
   assert_true(!no_chain.contains("里面可能另有一份坐标"))
+  assert_true(!no_chain.contains("逐字节重建"))
 }
 
 ///|
