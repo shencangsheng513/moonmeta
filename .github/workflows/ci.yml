@@ -34,6 +34,14 @@ jobs:
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
 
+      # 全新机器上注册表索引是空的：这个工作流第一次在 GitHub 真跑时，三条作业
+      # 全红在同一句 `Failed to resolve registry dependency moonbitlang/x ...
+      # module was not found in the registry`（2026-09-27）。本机永远复现不到——
+      # 我这份索引早在第一次装依赖时就落地了。这也是"本机逐条复放过"替代不了
+      # 真跑一次的原因。
+      - name: 刷新包索引（全新机器上索引为空）
+        run: moon update
+
       - name: Toolchain version
         run: moon version --all
 
@@ -61,6 +69,14 @@ jobs:
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
 
+      # 全新机器上注册表索引是空的：这个工作流第一次在 GitHub 真跑时，三条作业
+      # 全红在同一句 `Failed to resolve registry dependency moonbitlang/x ...
+      # module was not found in the registry`（2026-09-27）。本机永远复现不到——
+      # 我这份索引早在第一次装依赖时就落地了。这也是"本机逐条复放过"替代不了
+      # 真跑一次的原因。
+      - name: 刷新包索引（全新机器上索引为空）
+        run: moon update
+
       - name: Test with coverage
         run: moon test --enable-coverage
 
@@ -77,6 +93,14 @@ jobs:
         run: |
           curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      # 全新机器上注册表索引是空的：这个工作流第一次在 GitHub 真跑时，三条作业
+      # 全红在同一句 `Failed to resolve registry dependency moonbitlang/x ...
+      # module was not found in the registry`（2026-09-27）。本机永远复现不到——
+      # 我这份索引早在第一次装依赖时就落地了。这也是"本机逐条复放过"替代不了
+      # 真跑一次的原因。
+      - name: 刷新包索引（全新机器上索引为空）
+        run: moon update
 
       - uses: actions/setup-python@v5
         with:
