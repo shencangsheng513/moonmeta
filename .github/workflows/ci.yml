@@ -149,3 +149,10 @@ jobs:
 
       - name: 原位门禁自己有没有眼睛
         run: python ci/inplace_crosscheck.py --selftest
+
+      # 七个注入驱动（ci/mutations/）要外来语料，CI 上跑不了；但替它们**收尾判定**
+      # 的那一层是纯 python、不碰语料，必须在 CI 上被执行一次：判定器要是把某个驱动
+      # 的正常收尾读成绿（或读成红），文档里那句"每处坏法都红过"就会在没人看日志的
+      # 情况下继续成立——而这句话是这份申报书里唯一撑着"门禁不是装饰"的东西。
+      - name: 变异判定器真值表
+        run: python ci/mutations/run_all.py --selftest
