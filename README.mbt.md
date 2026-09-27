@@ -116,22 +116,53 @@ $ moon run cmd/main -- redact .scratch/fix/cross_xmp.jpg --policy strict
 ```
 
 `read` 与 `audit` 认 `--json`，一行一个文件、键序固定。机读输出说的不该比
-人读输出少：`xmp` 这个键就是人读那两句"另含 XMP 包"的同一个事实。
+人读输出少：`xmp` / `iptc` 两个键就是人读那两句"另含 XMP 包""另含
+IPTC/Photoshop 包"的同一个事实，`unread` 那一栏则是"这几段我们认不出来、
+也就没碰"——它既不是"已处理"，也不是"没有东西"。
 `findings` 里的 `tag` 是十进制整数（`315` 即 `0x013b`）：
 
 ```console
 $ moon run cmd/main -- read .scratch/fix/xmp_only.jpg --json
-{"file":".scratch/fix/xmp_only.jpg","container":"jpeg","xmp":true,"exif":false}
+{"file":".scratch/fix/xmp_only.jpg","container":"jpeg","xmp":true,"iptc":false,"unread":[],"exif":false}
 ```
 
 ```console
 $ moon run cmd/main -- audit .scratch/fix/cross_xmp.jpg --policy strict --json
-{"file":".scratch/fix/cross_xmp.jpg","policy":"strict","xmp":true,"exif":true,"findings":[{"dir":"IFD0","tag":315,"name":"Artist","category":"identity"},{"dir":"Exif","tag":36867,"name":"DateTimeOriginal","category":"timestamps"},{"dir":"Exif","tag":36868,"name":"DateTimeDigitized","category":"timestamps"},{"dir":"Exif","tag":36881,"name":"OffsetTimeOriginal","category":"timestamps"},{"dir":"Exif","tag":37500,"name":"MakerNote","category":"maker_note"},{"dir":"Exif","tag":42033,"name":"BodySerialNumber","category":"device_id"},{"dir":"Exif","tag":42037,"name":"LensSerialNumber","category":"device_id"},{"dir":"GPS","tag":0,"name":"GPSVersionID","category":"location"},{"dir":"GPS","tag":1,"name":"GPSLatitudeRef","category":"location"},{"dir":"GPS","tag":2,"name":"GPSLatitude","category":"location"},{"dir":"GPS","tag":3,"name":"GPSLongitudeRef","category":"location"},{"dir":"GPS","tag":4,"name":"GPSLongitude","category":"location"}]}
+{"file":".scratch/fix/cross_xmp.jpg","policy":"strict","xmp":true,"iptc":false,"unread":[],"exif":true,"findings":[{"dir":"IFD0","tag":315,"name":"Artist","category":"identity"},{"dir":"Exif","tag":36867,"name":"DateTimeOriginal","category":"timestamps"},{"dir":"Exif","tag":36868,"name":"DateTimeDigitized","category":"timestamps"},{"dir":"Exif","tag":36881,"name":"OffsetTimeOriginal","category":"timestamps"},{"dir":"Exif","tag":37500,"name":"MakerNote","category":"maker_note"},{"dir":"Exif","tag":42033,"name":"BodySerialNumber","category":"device_id"},{"dir":"Exif","tag":42037,"name":"LensSerialNumber","category":"device_id"},{"dir":"GPS","tag":0,"name":"GPSVersionID","category":"location"},{"dir":"GPS","tag":1,"name":"GPSLatitudeRef","category":"location"},{"dir":"GPS","tag":2,"name":"GPSLatitude","category":"location"},{"dir":"GPS","tag":3,"name":"GPSLongitudeRef","category":"location"},{"dir":"GPS","tag":4,"name":"GPSLongitude","category":"location"}]}
 ```
 
 `findings` 里只有命中的条目：策略没点名的东西（`Make`、`Copyright`）不出现，
-整包的 XMP 也不出现。前者是"留不留由人决定"，后者是"留了却没人说"——
-所以包必须有自己那个键。
+整包的 XMP 与 IPTC/Photoshop 包也不出现——它们不归 IFD 条目管，各用自己的键
+（`xmp` / `iptc`）交代。前者是"留不留由人决定"，后者是"留了却没人说"——
+所以包必须有自己那个键。只有包、没有 EXIF 的文件就走这条分支：
+`exif` 是 `false`，而那份隐私副本确实在里面。
+
+一张同时带着两种包、外加一段认不出来的东西的照片，能把这三键一次说全
+（下面这个文件来自 `ianare/exif-samples`，来路见"测试与验证"里那一段；
+仓库里不带它）：
+
+```console
+$ moon run cmd/main -- audit .scratch/exif-samples/jpg/orientation/landscape_1.jpg --policy strict
+.scratch/exif-samples/jpg/orientation/landscape_1.jpg: 策略 strict 命中 0 条。
+另含 XMP 包：逐条清单里看不到它；策略覆盖载体，会整包摘除。
+另含 IPTC/Photoshop 包：逐条清单里看不到它；策略覆盖载体，会整包摘除。
+  未解析段 1 段（本库不读也不删）：APP12@102
+```
+
+逐条清单命中 0 条，而这个文件里躺着两份完整副本——这就是为什么"命中几条"
+不能当脱敏的依据。摘完之后：
+
+```console
+$ moon run cmd/main -- strip .scratch/exif-samples/jpg/orientation/landscape_1.jpg -o .scratch/d9e_doc/l1.jpg
+元数据已整段摘除：EXIF,XMP 包,IPTC/Photoshop 包。
+已写出 .scratch/d9e_doc/l1.jpg
+$ moon run cmd/main -- read .scratch/d9e_doc/l1.jpg --json
+{"file":".scratch/d9e_doc/l1.jpg","container":"jpeg","xmp":false,"iptc":false,"unread":["APP12@2"],"exif":false}
+```
+
+`unread` 在产物里仍然指着那一段 APP12——**它换了偏移**（102 → 2），因为它前面
+那几段被摘掉了，而这一段我们既没读也没删。这一栏要说的是这个文件此刻的样子，
+不是"处理完了"：认不出来的东西只点名，绝不声称删掉了。
 
 写操作默认不覆盖输入文件；`-o` 指回输入会被拒绝（退出码 `2`），
 除非显式加 `--force`：
@@ -298,7 +329,7 @@ GPS/GPSLongitude → location
 | `MakerNote` | 厂商私有块（内容不受规范约束，坐标常藏在里面） | ✔ | ✔ |
 | `Comments` | `UserComment` | ✔ | ✔ |
 | `Timestamps` | `DateTime` 及各 `OffsetTime*` / `SubsecTime*` / `DateTime*` | ✘ | ✔ |
-| `Carrier` | 容器里成包的 XMP（JPEG APP1、PNG `tEXt`/`iTXt`），以及 TIFF 里装整包的 `0x02bc` / `0x02bd` / `0x8773` | ✔ | ✔ |
+| `Carrier` | 容器里成包的第二份副本：JPEG 的 XMP APP1 与 APP13（`Photoshop 3.0` 资源包，IPTC-IIM 住在里面）、PNG 里关键字为 `XML:com.adobe.xmp` 的 `tEXt`/`iTXt`，以及 TIFF 里装整包的 `0x02bc` / `0x02bd` / `0x8773` | ✔ | ✔ |
 
 `Carrier` 和上面六类不是同一种东西：其余六类删的是 IFD 里的一条条目，
 它删的是另一整套元数据。这一类是被真实语料逼出来的——逐条策略删干净之后，
@@ -306,6 +337,15 @@ GPS/GPSLongitude → location
 `aux:SerialNumber`：同一批事实的第二份副本，住在 XMP 包里，
 逐条清单永远不会把它列出来。所以现在它是一等公民：能点名、能删、
 删了要在报告与命令行里说出来（`Redaction::dropped_xmp`）。
+
+同一件事在另一种包上又来了一遍：JPEG 的 APP13 里那份 `Photoshop 3.0` 资源包
+（IPTC-IIM 住在里面，署名、版权、联系人常在这儿）在逐条清单里同样看不见，
+两批外来 JPEG 语料里各有 10 张 / 20 张带着它，而以前 `read` 只报 `xmp` 一位——
+于是那种文件会读成"什么都没有了"。现在它有 `Redaction::dropped_iptc` 与
+`read --json` 的 `iptc` 键，两档策略都连它一起摘、摘了都要说出来。
+这一位在 PNG 与裸 TIFF 上**必须**恒为 `false`：前者的 IPTC 走的是没解析的
+文本块（由 `unread` 逐段点名），后者是 IFD0 里的一条（逐条清单本来就看得见），
+两处报 `true` 都是无中生有，判据在 `ci/crosscheck_real.py` 里双向钉着。
 
 另有 `empty_policy()`：什么都不删，只用作只读审计的对照，连 XMP 包也不碰
 （`dropped_xmp` 因此是 `false`，不是"没有包"）。命令行目前只认 `privacy` 与
@@ -396,7 +436,8 @@ moon test --target js
 moon test --target wasm-gc
 ```
 
-150 个用例。三个后端各跑一遍，最近一次实测都是 150 passed、0 failed。此外：
+162 个用例。三个后端各跑一遍，2026-09-27 实测都是 `Total tests: 162, passed: 162,
+failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
 
 - **不自己给自己打分。** `ci/make_fixture.py` 用 Pillow 造 JPEG / PNG 测试
   文件，`ci/assert_pillow_reads.py` 先证明 Pillow 读得到这些条目（读不到的
@@ -442,7 +483,14 @@ moon test --target wasm-gc
   `timestamps` 一格，所以期望直接从同一个文件的 strict 审计结果按类别推
   （非时间戳的被点名条目必须在产物里读不到了、时间戳条目 Pillow 在原图看得到
   就还得在产物里看得到），再加一条逐字节比对钉住"缺省产物 == 显式
-  `--policy privacy` 的产物"。这四句都往库里注入过对应的坏并且确认它红：
+  `--policy privacy` 的产物"。
+  这一批里 IPTC 那一关的账另记一本：**语料里带 APP13 包 10 个，摘除并且被 CLI
+  说出来的 10 个，缺省档那一趟同样是 10 个**——这一次没有差额要解释：那 8 个
+  按设计拒绝改写的都是裸 TIFF，而 10 个带包的文件全在 `jpg/` 里（这一点是拿
+  这个文件自己的字节数的，不是按后缀推的）。`iptc` 键在全部 99 个文件上都与
+  原始字节双向核过（包括那 8 个没有产物的），`unread` 键在这一批里点出 12 段
+  本库不读也不删的段，每一段的名字与偏移都回到原文件字节上验过。
+  缺省档那四句判据都往库里注入过对应的坏并且确认它红：
   `privacy_policy` 的 `timestamps` 改 true → "privacy 把该保留的时间戳删了"
   （4 个文件）；`location` 改 false → "privacy 没删掉被点名的条目"（3 个）；
   `carrier` 改 false → "privacy 之后产物里还有 XMP 包"（3 个，含只有 XMP
@@ -454,21 +502,31 @@ moon test --target wasm-gc
   分母单独打印：**写侧产物 89 个，其中源文件带着 XMP 包 34 个**，与 strict 那一档的
   "产物复查 89 / 摘除并披露 34"逐格同宽——这就是这一关要的性质：凡 `strict redact`
   写得出的文件，`strip` 也必须写得出来。六路观察各自独立、任何一路红都不需要另一路
-  背书：产物被我们自己的 `read` 判成 `exif=false` 且 `xmp` 不为真、被 Pillow 读不出
-  四张目录里的任何条目、字节里既搜不到包标记也搜不到那 16 个敏感键、CLI 那句话点名的
+  背书：产物被我们自己的 `read` 判成 `exif=false` 且 `xmp`、`iptc` 都不为真、
+  被 Pillow 读不出四张目录里的任何条目、字节里既搜不到包标记（XMP 的与 IPTC 的）
+  也搜不到那 16 个敏感键、CLI 那句话点名的
   载体与这个文件的事实一致、输入逐字节没动、像素与原图一致。
   "句与事实"那一判刻意不做子串查找：否定那句"这个文件本来就没有 EXIF，也没有 XMP 包"
   里 EXIF 和 XMP 两个词都在，查子串会把一条谎当成实话；那句话因此从 `strip_file`
   里抽成了 `strip_said`，四个状态各一句、由 `main_wbtest.mbt` 逐字钉住。
-  这六路各注入过一次坏并确认它红（跑的是这批语料的前 4~5 个文件）：jpeg 的 strip
+  这几路各注入过一次坏并确认它红（跑的是这批语料的前 4~5 个文件）：jpeg 的 strip
   跳过 XMP 包 → 1 个文件同时红三句（产物里还有包、`read` 还报得出 XMP、那句话没交代
   摘除它）；png 侧同样跳过 → 4 个文件红；摘干净了却报告"本来就没有" → 4 个文件红，
   而且**只**红在句上（字节与 Pillow 两路都不报，说明这一路不是替上一路顶岗）；
   让 strip 对 JPEG 一律拒绝改写 → 3 个文件红在"redact 写得出的文件，strip 退出码"
   那一句（这一路不比对错误措辞，比对的是两个动作得共用同一道判据）；
   把这一关整个短路 → 一格都没跑，脚本自己打印"strip 这一关一个文件都没跑到"并
-  返回 1：全绿不等于测过。每次注入都在 `finally` 里按字节还原并核对 sha，
-  五处跑完再复跑一次真绿（实测 rc=0）。
+  返回 1：全绿不等于测过。D9-E 之后又补了两格同样形状的坏：jpeg 的 strip 跳过
+  APP13 → 1 个文件同时红两句（`read` 还报得出 IPTC 包、字节里还搜得到那个头），
+  摘干净却不交代 → 1 个文件**只**红在"源文件带着 IPTC/Photoshop 包，strip 却没有
+  交代摘除它"那一句。**这两格不是加进去就有效的**：带 APP13 的文件在这批语料的
+  字典序里排在第 11、31、32、51、77……位，`--limit 4` 一步都走不到它们，于是驱动
+  多了一个 `--only` 透传（对拍脚本本来就支持），两格都点到 `landscape_1.jpg`——
+  实测各"分诊 1 个"，这一句是"那条分支真的跑到了"的证据，没有它这两格是死闸。
+  每次注入都在 `finally` 里按字节还原并核对 sha，七处跑完再复跑一次真绿
+  （实测 rc=0、分诊 0 个）。收尾那句以前硬写着"五处坏各处红一次"，改成派生数字的
+  同时给判定器补了一条计数闸：`期望表态 N 处 / 抓到 M 处` 两个数必须相等，
+  否则把正则从"五处"放宽成"若干处"会让少红一格照样算绿（这一条正反各占真值表一格）。
   还没被语料覆盖的那一半得说清：`strip` 对裸 TIFF 的分支在这批语料里 0 格
   （那 8 个全在重写判据那儿按设计停了），那一支由库内测试和 12000 份性质测试
   （`strip_any` 是七个入口之一）覆盖，不是这条语料闸。**这一句是当时那批的口径**：
@@ -486,6 +544,10 @@ moon test --target wasm-gc
   这条限制现在有数了。那 5 张跑的是同一个脚本（6 秒）：**ok 5 / triage 0**，XMP 闸
   4 带包 / 5 产物复查 / 4 摘除并披露，缺省档那一趟同样是 5 产物复查 / 4 摘除并披露，
   `strip` 那一趟 5 个产物、其中 4 个源文件带着包，`xmp` 键复核 5 份，量尺归因 0 格。
+  这一轮的 IPTC 闸在 PNG 上是**要求它恒为 0** 的那一半：带包 0 / 摘除并披露 0 /
+  缺省档 0，而 `iptc` 键仍然逐份与这个文件的字节比过（5 份）——PNG 没有成包的
+  IPTC 载体，所以这一格要钉的不是"摘得干净"，是"不许无中生有地说有"；
+  `unread` 在这一批里点出 8 段。
   PNG 的两种形状各撞到一次：`exif.png` 是外部工具写的真 `eXIf` 块（Pillow 读出
   1 条 274，我们读出同一条，逐条比对真的跑起来了）；另外 4 张只有住在
   `tEXt`/`iTXt` 里的 XMP 包——那种文件 Pillow 会从包里造出一个 `Orientation`，
@@ -503,6 +565,11 @@ moon test --target wasm-gc
   外来裸 TIFF 上这道判据同样一次都没让路，库宁可把整个文件原样留着，也不写一个
   它不能证明逐字节等价的产物。这一批的绿因此**不**包含裸 TIFF 写侧，脚本自己就把
   这句话打印出来并返回 1（"strip 这一关一个文件都没跑到"）——全绿不等于测过。
+  这一批的 IPTC 闸同样是"要求它恒为 0"那一半：带包 0 / 摘除并披露 0 / 缺省档 0，
+  `unread` 点出 0 段，而 `iptc` 键在进分母的 86 个文件上都与原文件字节核过。
+  裸 TIFF 上 IPTC 不住在"成包"里，而是 IFD0 的一条（`IptcNaa` 0x8773、
+  `PhotoshopSettings` 0x02bd——逐条清单本来就看得见它们），所以这一位在裸 TIFF 上
+  按设计恒为 false，报 true 就是无中生有：这一格钉的正是"不许说在有"。
   跟着第三批补上的是脚本口径的一次升级：库里每一句"这一步我不做"都带着数字
   （IFD0 在哪个偏移、文件多少字节、模型重建出多少字节、哪个 tag 用了哪个类型码、
   指针越到哪个偏移），这些数以前是**信库说的**，等于让被检方自己填报告。现在每一
@@ -560,6 +627,15 @@ moon test --target wasm-gc
   量尺解不开），复核不上 0 个。三把新尺子都遵守同一条保守规矩：证据凑不齐
   （块边界算不出来、签名数不出来、停下的原因对不上）就返回"无从复核"落回 triage，
   绝不静默放行。
+  这一批的 IPTC 闸终于有了非零的一格：**带包 20 / 摘除并披露 15 / 缺省档那一趟
+  15**，`iptc` 键在进分母的 44 个文件上都按字节双向核过，`unread` 点出 3 段。
+  20 与 15 差的那 5 个不是漏网，是一个字节都没写出去的那 5 个文件——
+  `hopper_bad_exif.jpg`、`invalid-exif.jpg`、`photoshop-200dpi-broken.jpg`、
+  `truncated_app14.jpg`、`truncated_exif_dpi.jpg`，正好是这一批 8 个按设计拒绝
+  改写的文件里带包的哪些（这个名字表是拿产物目录与语料字节对出来的，不是推的）。
+  产物侧另补了一次穷扫：这一轮的 125 份产物（32 份 `.stripped` + 32 份
+  `.redacted` + 32 份 `.privacy` + 29 份 `.default`）里，逐份读字节，
+  含 `Photoshop 3.0\0` 的 0 份。
   顺手抓到的还有一个更难看的东西：第二趟的兜底文案就地抄了一遍第一趟那句话，
   抄来了一个该作用域里不存在的名字——那条路一旦命中不是红，是整批崩在
   `NameError` 上；而四批语料没有一格走到它，所以它一直活着。现在两趟共用
@@ -571,15 +647,17 @@ moon test --target wasm-gc
   一直在 `.gitignore` 的 `.scratch/` 里，也就是说文档里那句"证据在这儿"在克隆
   出来之后是断的（比 untracked 更静默——`git ls-files .scratch` 是 0 个文件）。
   五个驱动（`mut_d7` / `mut_d8` / `mut_explain` / `mut_d11b` / `mut_d12`）现在
-  都在 `ci/mutations/` 下，跑法仍然是在仓库根目录 `python ci/mutations/<名字>.py`。
+  都在 `ci/mutations/` 下（那是搬家当天的名单，今天这个目录里有八个驱动，
+  下文收尾判定那一段说的是全集），跑法仍然是在仓库根目录 `python ci/mutations/<名字>.py`。
   搬家当天就抓到一次真错：那两个语料级驱动用 `parents[1]` 反推仓库根，从
   `.scratch/` 挪到 `ci/mutations/` 之后深度多了一层，它们把 `.scratch` 找成了
   `ci/.scratch`，崩在 `DUMP.mkdir` 那一行——崩溃发生在任何注入之前，所以库里
   没留下变异，但这种错本来可以悄悄变成"跑过了"。现在按 `moon.mod` 往上找模块根，
   搬多远都不会指错；三个纯 python 驱动（不需要语料、不需要 moon）从新路径复跑
   实测：`mut_d12` 10/10 抓到、`mut_d11b` 5/5 抓到、`mut_explain` 五处全抓到，
-  三者还原后自测都回到 `Ran 112 tests` + `OK`。
-  同一批东西的**收尾判定**也搬进了仓库：`ci/mutations/run_all.py` 串行跑完七个驱动，
+  三者还原后自测都回到 `Ran 112 tests` + `OK`（那是当天的格数，今天同一条命令是 141）。
+  同一批东西的**收尾判定**也搬进了仓库：`ci/mutations/run_all.py` 串行跑完
+  `ci/mutations/` 下的每一个驱动（驱动名单是从目录里发现的，不另抄一份），
   逐个打印"测得 / 问题"。它不是图省事的 wrapper——判定这一层本身会错，而且错的方向
   是"把绿读成红"和"把红读成绿"都会：按子串扫 `FAIL` 抓不到绿，今天那份判成绿的
   `mut_explain` 日志里就有 5 行 `FAILED`（那是每处注入本该打出来的红，unittest 的
@@ -587,14 +665,30 @@ moon test --target wasm-gc
   "对不上"出现 4 次——都在 CAUGHT 行里，那句是驱动把它期望的文案整句打出来的结果。
   所以现在只认每个驱动**顶格**
   那几行自己的收尾语，外加两组必须相等的计数（`期望表态 N 处 / 抓到 M 处`、
-  `开跑前锚点清点 A/B`）。判定器自己有一张 19 格真值表（`--selftest`：纯函数、
+  `开跑前锚点清点 A/B`）。判定器自己有一张真值表（`--selftest`：纯函数、
   不起子进程、不需要语料，变异行一律喂 rc=0，否则"红"是退码给的不是被测那道闸给的），
-  另有 `--report <目录>` 只判定盘上已有日志、不重跑。真值表那一格进了 CI 的命令行作业。
-  2026-09-27 全量复跑实测：七个驱动 `7/7 GREEN`（`mut_d7` 五处、`mut_d8` 六处、
-  `mut_d10` 9/9、`mut_d11b` 5/5、`mut_d12` 10/10、`mut_d13` 5/5、`mut_explain`
-  五处全抓到），跑完 `git status --porcelain` 为空——注入过的文件都按字节回去了。
-  对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 112 个用例（实测
-  `Ran 112 tests`、`OK`、rc=0；两轮前是 45 个，那一轮加的 40 个全部钉当时的
+  今天实测 `判定器真值表：25 格，错 0 格`。它的形状是：每个驱动两格打底（正例判绿、
+  注入出来的红句必须翻红），再加几格专钉判定器自己的松紧——把"抓到 M 处"比
+  "期望表态 N 处"少一格的输出喂进来必须判红（`mut_d7` 这一轮正是把收尾语从硬写的
+  "五处"换成派生数字，没有这条负例，放宽正则就等于放宽判定），退码非 0 而收尾语
+  说绿的也必须判红；最后一格钉 CI 名单：
+  `SPECS` 里声明的驱动与 `NEEDS_CORPUS` 里表态的驱动做**双向**差集（今天 8 对 8，
+  两个方向都为空才算过），少一边就是"新驱动悄悄不进 CI"。真值表那一格进了 CI 的
+  命令行作业；另有 `--report <目录>` 只判定盘上已有的日志、不起子进程。
+  2026-09-27 上午的全量复跑实测：七个驱动 `7/7 GREEN`（当时 `mut_d7` 五处、
+  `mut_d8` 六处、`mut_d10` 9/9、`mut_d11b` 5/5、`mut_d12` 10/10、`mut_d13` 5/5、
+  `mut_explain` 五处全抓到），跑完 `git status --porcelain` 为空——注入过的文件
+  都按字节回去了。
+  **D9-E 加完那一层之后按"旧变异集必须复跑"再跑一遍，第一个红就是 `mut_d7`**：
+  它的三个锚点钉在 `moonmeta_container.mbt` 的 strip arm 上，而 IPTC 给那个
+  `match` 分支多了一行 `dropped_iptc`，于是三处注入点各命中 0 次。驱动自己没有
+  假装跑过（打印"注入点命中 0 次，跳过"），收尾判据因此缺席，`run_all` 把它判成
+  RED——这一格值得记的是**方向**：锚点漂了不是失败，漂了之后静默跳过才算。
+  修法是更新锚点、按 IPTC 之后的现句重写三处注入，再补两格只有 APP13 才打得到的
+  坏（见上面 strip 那一段）。修完单独实跑：`期望表态 7 处，抓到 7 处`，
+  七处跑完的复跑 rc=0、分诊 0 个。
+  对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 141 个用例（实测
+  `Ran 141 tests`、`OK`、rc=0；两轮前是 45 个，那一轮加的 40 个全部钉当时的
   "数字复核"：条目走查算出的
   类型码／声明字节数／值偏移、值指针的四种真值（越过文件尾 / 在文件内但加上宽度越出、
   两种都放行；两种都落得进、数字根本不在字节里）、子目录指针、IFD 偏移、
@@ -629,6 +723,20 @@ moon test --target wasm-gc
   判据本身。另一格钉保守方向：块边界算不出来的时候不许当通过，落回 triage。
   那 2 个钉兜底文案（引擎原句必须在场、错误句缺失不许崩），前面说过为什么只能
   在这里钉：语料没有一格走到它。
+  这一轮再加 29 个，钉的是 D9-E 那三条新判据**本身**：`iptc` 键的双向（字节里有
+  却说无要红、PNG 与裸 TIFF 上说在有要红、键整个不见了要出声）、`unread` 的每一段
+  （名字与段码对不上要红、偏移不是段首要红、一段坏不许掩盖另一段坏、同一份字节
+  不许报两遍）、`strip` 那句话的第三个载体（带着包却没点名要红、三样都没有却说
+  摘了东西要红、IPTC 那一趟不许去碰共用的分母）。
+  这三判据还各自被往里打过一次坏：新驱动 `ci/mutations/mut_d9e.py` 十六处，
+  靶子是 `ci/crosscheck_real.py`，跑的是 `crosscheck_selftest`（不起 moon、不碰
+  语料，所以它也是 `--ci` 那一步里的五个之一），要求退码非 0 **且** stderr 里出现
+  指名那一格的用例名——只看退码的话，"坏法没打到那一格、却把别的用例弄崩了"也算红。
+  本轮实测 `期望表态 16 处，抓到 16 处`、开跑前锚点清点 16/16 恰好在位一次、
+  每处 `finally` 按字节还原（sha `9adf15e4f410` 与基线一致）。其中 N6、N9 两格
+  钉的是"正例也得一起塌"：把 PNG 块类型的偏移从类型域挪到长度域、或者让段码不再
+  与名字比对，连"这一句本来就是对的"那格都会红——这才说明正例断言真的站在数值上，
+  而不是只查了个非空。
   原位那条路另有一把尺子：`ci/inplace_crosscheck.py` 自带 14 格自测（`--selftest`
   实测 rc=0，输出逐格打印"期望 / 测得"）——2 条来路闸先证明"合法产物本身"与"在合法产物上再动一格受保护区间
   内的字节"这两格测得出来，6 条反向闸各把一种坏法注入一次并要求它红：施工区间外
@@ -653,11 +761,13 @@ moon test --target wasm-gc
   `.github/workflows/ci.yml` 解析出 `cli` 作业的 run 步骤并逐条执行，开跑前先过两道
   对账闸（步骤数按缩进数、命令条数按命令名前缀数，两个口径都要和解析器取出的一致，
   D13 那一轮实测 `清单对账：11 个步骤、28 条命令，两个口径一致`；这之后往 `cli` 作业里
-  加了两步——"变异判定器真值表"与今天补的"刷新包索引（`moon update`）"——
-  同一条命令实测 `清单对账：13 个步骤、30 条命令，两个口径一致`），本机环境复放不了的
+  加了三步——"变异判定器真值表"、"刷新包索引（`moon update`）"、D9-E 补的
+  "语料无关的注入驱动实跑（`run_all.py --ci`）"——
+  这一轮同一条命令实测 `清单对账：14 个步骤、31 条命令，两个口径一致`），本机环境复放不了的
   3 条（`curl` 装工具链、`echo` 写 GITHUB_PATH、`pip` 装 Pillow）逐条打印
-  `[SKIP-ENV]` 而不是悄悄少一条。今天整条复放实测 `复放清单：13 个步骤、27 条命令
-  …非 0 的 0 条`（27 + 3 = 上面那个 30）。其中对拍脚本对着 fixture 目录跑（CLI 那一步留下的产物一并算进去
+  `[SKIP-ENV]` 而不是悄悄少一条。上一轮（那时 `cli` 作业还是 13 步）整条复放实测
+  `复放清单：13 个步骤、27 条命令
+  …非 0 的 0 条`（27 + 3 = 那一轮的 30）。其中对拍脚本对着 fixture 目录跑（CLI 那一步留下的产物一并算进去
   共 14 份，输出目录像计划文件那样放在语料目录之外，否则上一轮的产物会被这一轮当
   语料）报 ok 12 / 按设计拒绝 2（两个裸 TIFF），拒绝复核那一行的数字也复核过：
   写下去会丢的字节最少 1148、最多 1152；第二份元数据块 / 断在段表中间 / 块装不下
@@ -708,8 +818,8 @@ moon test --target wasm-gc
   断言，一个后端过、另一个不过，说明代码里混进了只在某个运行时装得起来的
   行为。
 - 覆盖率：`moon test --enable-coverage && moon coverage analyze -- -f summary`
-  → 1491/1705 行（87.4%，同一条命令实测 `Total tests: 150, passed: 150, failed: 0`）。
-  未覆盖的 214 行里有 149 行在 `cmd/main/main.mbt`（240/389），
+  → 1558/1798 行（86.7%，同一条命令实测 `Total tests: 162, passed: 162, failed: 0`）。
+  未覆盖的 240 行里有 176 行在 `cmd/main/main.mbt`（260/436），
   没覆盖的几乎全是真正读写文件的几行：`x/fs` 在非 native 后端没有文件系统，
   而包的测试要在三个后端都跑绿，所以判断逻辑（路径拼装、覆盖拒绝、策略解析、
   这一轮新加的原位模式分流与那句边界声明）单独抽成纯函数测了，IO 那几行留给
