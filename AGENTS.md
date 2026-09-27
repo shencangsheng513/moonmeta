@@ -51,3 +51,78 @@ You can browse and install extra skills here:
   scientific computations), prefer assertion tests. You can use
   `moon coverage analyze > uncovered.log` to see which parts of your code are
   not covered by tests.
+
+## 这个仓库额外要守的（每条都有它存在的原因，不是装饰）
+
+### moon 的跑法
+
+- `moon test --target` 只吃 `wasm | wasm-gc | js | native | llvm | all`，**没有 `default`**。
+  三后端矩阵是 `wasm`/`js`/`wasm-gc`；`native` 在本机跑不了，因为 `moonbitlang/x/fs`
+  带 native C stub 而这台机器没有 C 编译器。这是文档里写明的已知缺口，不是忘了跑。
+- `x/fs` 在非 native 后端没有文件系统：测试里一条真实文件读写都跑不了。可行解法是把
+  判断（路径拼装、覆盖拒绝、策略解析）抽成纯函数单测，IO 那几行交给命令行端到端作业，
+  并在测试文件头写明为什么故意不覆盖。
+- **moon 批处理一律串行**：`_build` 是共享目录，两个批处理同时在跑时读数不能当证据。
+  起 `moon` 之前先清点有没有别的 moon/test 进程在跑（这台机器上常有并行会话）。
+
+### MoonBit 语言层：报错信息完全指不到真因的那几处
+
+- labelled 实参用 `=`，不是 `:`：`OptionArg("output", short='o', ...)`。写成 `short: 'o'`
+  报 "requires 1 positional arguments, but is given 2"。结构体字面量里才是 `field: value`。
+- `import { ... }` 只能出现在 `moon.pkg`；写在 `.mbt` 里报 "Invalid import declaration here"。
+- `-> T raise String` 非法（"Type String is not an error type"）。错误类型必须是
+  `pub suberror`。
+- `pub suberror` 的变体是包内可见：白盒 `_wbtest.mbt` 里 `BadChecksum(...)` 直接用，
+  黑盒 `_test.mbt` 里要 `@pkg.MetaError::BadChecksum` 或走 `Show`。
+- 只 `derive(Debug)` 没有 `Show` 的值（`Bytes`、`@fs.IOError` 这类）：`println("\{e}")`
+  编译失败，`e.to_repr()` 已废弃 → 用 `@debug.to_string(e)`，并给 `moon.pkg` 加
+  `moonbitlang/core/debug`。
+- `try e catch { _ => None }` 整体仍是 raise 表达式；要拿到 `Option` 必须补
+  `noraise { v => Some(v) }`。
+- 一个 `match` 的 scrutinee 位置上不能再内联另一个 `match`——先 `let x = match ...` 再 match 它。
+- 字符串字面量里插值不能跨行；多行 `if ... else` 拼进 `"\{...}"` 会炸成
+  "unterminated string literal" → 把那句话提成独立 `fn`。
+- 数组切片模式 `[_, .. rest] => rest` 给的是 `ArrayView`，赋给 `Array[String]` 要 `rest.to_owned()`。
+
+### 文档是被测试钉住的
+
+- README 里那段库用法示例逐字住在 `moonmeta_readme_test.mbt`（那个文件第一行就这么写着）。
+  改 README 的示例代码必须同步改它，否则 `moon test` 红。
+- README 的 64 个 tag 规范名逐条断言在 `moonmeta_tags_test.mbt` 里。
+- README 里 ```console 那些真实输出对着 `python ci/make_fixture.py` 造的六份文件
+  （默认落 `.scratch/fix/`，CI 落 `/tmp/fix`）。换 fixture 名字或路径 ⇒ 示例要重跑、
+  贴真输出，不许留旧输出。
+- 文档里不写"某件东西不存在 / 从没跑过 / 还没接上"，除非当场跑过一条能证明它的命令。
+  引用产物只能指到 clone 之后还存在的路径：`.scratch/` 在 `.gitignore` 里，
+  写进正文就是断链（这批变异驱动就是这么从 `.scratch/` 搬进 `ci/mutations/` 的）。
+- 提交前跑 `moon fmt && moon info`。CI 用 `git diff --exit-code` 卡这两处的漂移。
+
+### 门禁（都不要求语料在位，都能在 CI 复现）
+
+| 命令 | 判据 |
+| --- | --- |
+| `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran 112 tests` / `OK`） |
+| `python ci/inplace_crosscheck.py --selftest` | 原位门禁自己有没有眼睛（逐格 OK + 收尾"通过"） |
+| `python ci/mutations/run_all.py --selftest` | 变异判定器真值表（收尾"判定器真值表：N 格，错 0 格"） |
+| `python ci/replay_cli.py --check-only` | CI 的 `cli` 作业步骤/命令行清单对账（两个口径必须一致） |
+
+全量变异集是 `python ci/mutations/run_all.py`（要语料在位、串行、跑完 `git status --porcelain`
+必须为空；每处注入都是"改坏 → 确认红在那一格 → `finally` 按字节还原并核对 sha"）。
+判定只认每个驱动顶格那几行自己的收尾语与两组必须相等的计数，**按子串扫 `FAIL`/`对不上` 会把绿读成红**。
+
+### 语料
+
+- 四批外来语料：第一批是 `ianare/exif-samples` 整份 clone（按 `ci/crosscheck_real.py`
+  里 `IMAGE_SUFFIXES` 那五个后缀命中）；第二/三/四批用
+  `python ci/grab_corpus.py --batch {tiff,jpeg,png} --out <目录> <Pillow 克隆>` 从上游挑，
+  只看 `Tests/images` 根下那一层，再按容器魔数与"字节里到底有没有元数据标记"筛。
+- 上游在动，所以挑中份数默认只打印不判定（`--expect` 是地板）。
+- 语料与全部产物落 `.scratch/`（已 gitignore），**不入库**；入库的只有 `ci/` 里的代码和文档。
+
+### CI
+
+- `.github/workflows/ci.yml` 三个作业各自都要有一步 `moon update`：全新 runner 的注册表索引
+  是空的，缺它就红在 `Failed to resolve registry dependency moonbitlang/x`。这一格本机
+  复现不到（开发机的索引早就落地过，`moon check`/`moon test` 从来不联网）。
+- push 触发同时列了 `main` 和 `master`。
+
