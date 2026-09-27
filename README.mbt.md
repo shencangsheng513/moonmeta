@@ -650,10 +650,12 @@ moon test --target wasm-gc
   `python ci/replay_cli.py --moon D:/moonbit/bin/moon.exe` 直接从
   `.github/workflows/ci.yml` 解析出 `cli` 作业的 run 步骤并逐条执行，开跑前先过两道
   对账闸（步骤数按缩进数、命令条数按命令名前缀数，两个口径都要和解析器取出的一致，
-  本轮实测 `清单对账：11 个步骤、28 条命令，两个口径一致`），本机环境复放不了的
+  D13 那一轮实测 `清单对账：11 个步骤、28 条命令，两个口径一致`；这之后往 `cli` 作业里
+  加了两步——"变异判定器真值表"与今天补的"刷新包索引（`moon update`）"——
+  同一条命令实测 `清单对账：13 个步骤、30 条命令，两个口径一致`），本机环境复放不了的
   3 条（`curl` 装工具链、`echo` 写 GITHUB_PATH、`pip` 装 Pillow）逐条打印
-  `[SKIP-ENV]` 而不是悄悄少一条。本轮整条复放实测 `复放清单：11 个步骤、25 条命令
-  …非 0 的 0 条`。其中对拍脚本对着 fixture 目录跑（CLI 那一步留下的产物一并算进去
+  `[SKIP-ENV]` 而不是悄悄少一条。今天整条复放实测 `复放清单：13 个步骤、27 条命令
+  …非 0 的 0 条`（27 + 3 = 上面那个 30）。其中对拍脚本对着 fixture 目录跑（CLI 那一步留下的产物一并算进去
   共 14 份，输出目录像计划文件那样放在语料目录之外，否则上一轮的产物会被这一轮当
   语料）报 ok 12 / 按设计拒绝 2（两个裸 TIFF），拒绝复核那一行的数字也复核过：
   写下去会丢的字节最少 1148、最多 1152；第二份元数据块 / 断在段表中间 / 块装不下
@@ -688,7 +690,17 @@ moon test --target wasm-gc
   "元数据已清除"这两条分支——混为一谈的脱敏工具没有可信的理由。
   注意裸 TIFF 的 IFD0 就是图像本身的结构，"没有 EXIF"指的是没有 34665 指针。
 - 这些脚本的调用顺序就是 `.github/workflows/ci.yml` 里 `cli` 作业的顺序，
-  本地可以逐条复跑。工作流本身还没在 GitHub 上跑过：仓库目前没有配远端。
+  本地可以逐条复跑。**工作流本身今天也在 GitHub 上真跑过了**：仓库已经建了公开
+  远端 `https://github.com/shencangsheng513/moonmeta`（分支 `master`，触发条件
+  同时列了 `main` 与 `master`），push 之后 `gh run list` 实测三次——前两次
+  （`36302587947`、`36302738605`）各 18 秒、**五个作业全红在同一句**
+  `Failed to resolve registry dependency \`moonbitlang/x\` ... module was not
+  found in the registry`，第三次（`36302932437`）五个作业全绿、56 秒。
+  根因是三个作业都缺一步 `moon update`，而**这一格在本机永远复现不到**：开发机的
+  注册表索引早就落地过，`moon check` 根本不联网。更难看的一点是 `moon new` 生成的
+  `copilot-setup-steps.yml` 里本来就有这一步，是手写这个 `ci.yml` 时把它丢了。
+  所以这一串"本机逐条复放全 0"的证据链，当时离"CI 真的会绿"还差着一步——而那一步
+  只有推出去才知道。
 - 测试矩阵是 wasm / JavaScript / wasm-gc，没有 native：`x/fs` 带 C stub，
   `moon test --target native` 要先装一个 C 编译器。三个后端跑的是同一套
   断言，一个后端过、另一个不过，说明代码里混进了只在某个运行时装得起来的
