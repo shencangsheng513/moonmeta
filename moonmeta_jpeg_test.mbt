@@ -403,6 +403,42 @@ test "载荷超过 16 位段长上限：拒绝写入而不是截断" {
 }
 
 ///|
+/// 同一条错标成 ASCII 的 10 字节条目，装进真的 APP1 载荷。
+fn mislabelled_ascii_block() -> Bytes {
+  let v : Array[Byte] = [
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00,
+    // 0x011a, ASCII x10 -> 26
+     0x1a, 0x01, 0x02, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00,
+    // 值：第一个字节就是 NUL
+     0x00, 0x04, 0x95, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]
+  Bytes::from_array(v)
+}
+
+///|
+/// 这一条是外来语料抓到的真 bug：`privacy` 谁都没点名，产物却被打坏——
+/// 读侧在 NUL 处截断、写侧只补一个 NUL，条目从 10 字节缩成 1 字节，
+/// Pillow 随后 `x_resolution[1]` 越界，整个文件"不能被识别为图像"。
+test "没点名的 10 字节 ASCII 条目，脱敏后在产物里逐字节还在" {
+  let file = jpeg_with(Some(mislabelled_ascii_block()))
+  let (out, report) = @moonmeta.jpeg_redact(file, @moonmeta.privacy_policy()) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(report.removed.length(), 0)
+  let payload : Array[Byte] = [
+    0x00, 0x04, 0x95, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]
+  @test.assert_eq(contains_bytes(out, payload), true)
+  let t = decoded(out)
+  @test.assert_eq(t.ifd0.length(), 1)
+  match t.ifd0[0].value {
+    @moonmeta.Text(s) => @test.assert_eq(s.length(), 10)
+    v => fail("expected Text, got \{v}")
+  }
+}
+
+///|
 test "回写幂等：同样的载荷写回去，得到同样的字节" {
   let file = jpeg_with(Some(fixture()))
   let out = @moonmeta.jpeg_replace_exif(file, fixture()) catch {

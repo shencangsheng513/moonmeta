@@ -323,6 +323,46 @@ test "缩略图链一定会被丢掉，所以一定要报告" {
 }
 
 ///|
+/// 语料 `exif_gps.jpg` 的形状：没有 IFD1 链，但 IFD0 里挂着
+/// `0x0202` ThumbnailLength（声明的长度还是 `0xffffffff`）。
+/// 回写时这一对指针一定会没——它们指的字节不会被重发。
+fn thumb_ptr_block() -> @moonmeta.TiffBlock {
+  let long_entry : @moonmeta.IfdEntry = {
+    tag: 0x0202,
+    type_code: 4,
+    value: @moonmeta.Longs([4294967295L]),
+  }
+  {
+    little: true,
+    ifd0: [long_entry, ascii_entry(0x013b, "who\u0000")],
+    exif: [],
+    gps: [],
+    interop: [],
+    has_ifd1: false,
+  }
+}
+
+///|
+test "只挂缩略图指针、没有 IFD1 链时，丢了也照样要报告" {
+  let (kept, report) = thumb_ptr_block().redact(@moonmeta.strict_policy())
+  @test.assert_eq(listing(report.removed), ["IFD0/Artist(identity)"])
+  @test.assert_eq(report.dropped_thumbnail, true)
+  // 旗子说了丢了，产物里就得真没有
+  let bytes = @moonmeta.encode_tiff(kept) catch {
+    e => fail("encode failed: \{e}")
+  }
+  let back = @moonmeta.decode_tiff(bytes) catch {
+    e => fail("decode failed: \{e}")
+  }
+  @test.assert_eq(back.get(0x0202), None)
+  // 反向：一条都没删时容器层原样返回输入，什么也没丢，
+  // 这时候报"丢了缩略图"就是谎话。
+  let (_, none) = thumb_ptr_block().redact(@moonmeta.empty_policy())
+  @test.assert_eq(none.removed.length(), 0)
+  @test.assert_eq(none.dropped_thumbnail, false)
+}
+
+///|
 test "非 ASCII 文本在回写时明确报错，不会被换成问号" {
   let dirty : @moonmeta.TiffBlock = {
     little: true,

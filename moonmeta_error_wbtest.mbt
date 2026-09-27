@@ -87,12 +87,40 @@ test "语料脚本接头暗号：每一句设计内拒绝都钉成整句" {
       UnknownFormat(0),
       "none of the JPEG, PNG or TIFF magics is at offset 0; the container cannot be identified",
     ),
+    // 原位模式这三族。`ci/inplace_crosscheck.py` 拿它们的句子形状当接头暗号：
+    // Shared / Cycle 用正则抠数，Opaque 那一族还要拿四个短语对账"说的是哪一种看不懂"。
+    (
+      TiffInplaceShared(
+        273, 40, 16, 146, "the image data itself, declared at offset 8",
+      ),
+      "refusing to write this bare TIFF in place: tag 0x0111 would write offsets 40..56, but those bytes are already the image data itself, declared at offset 8 (of the table at offset 146); in-place mode never moves bytes, and it will not guess which of the two uses is the real one",
+    ),
+    (
+      TiffInplaceCycle(146),
+      "refusing to write this bare TIFF in place: the table at offset 146 is reached twice, so the file holds two readings of the same bytes and there is no way to say which one a viewer would use",
+    ),
+    (
+      TiffInplaceOpaque(273, 0),
+      "refusing to write this bare TIFF in place: tag 0x0111 declares where the pixel data sits, but its partner entry is missing; guessing wrong would delete the image, so the file is left untouched",
+    ),
+    (
+      TiffInplaceOpaque(273, -1),
+      "refusing to write this bare TIFF in place: tag 0x0111 declares where the pixel data sits, but its partner entry lists a different number of values; guessing wrong would delete the image, so the file is left untouched",
+    ),
+    (
+      TiffInplaceOpaque(273, -2),
+      "refusing to write this bare TIFF in place: tag 0x0111 declares where the pixel data sits, but the pixel range it declares runs past the end of the file; guessing wrong would delete the image, so the file is left untouched",
+    ),
+    (
+      TiffInplaceOpaque(278, 13),
+      "refusing to write this bare TIFF in place: tag 0x0116 declares where the pixel data sits, but its value is TIFF type 13, not a list of byte offsets; guessing wrong would delete the image, so the file is left untouched",
+    ),
   ]
   for c in exact {
     let (e, s) = c
     @test.assert_eq(e.to_string(), s)
   }
-  @test.assert_eq(exact.length(), 11)
+  @test.assert_eq(exact.length(), 17)
 }
 
 ///|

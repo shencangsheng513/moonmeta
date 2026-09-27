@@ -42,7 +42,7 @@ enum Locator {
 }
 
 ///|
-/// 20 个变体一个一个表态，故意为没有 `_` 的穷尽匹配。
+/// 23 个变体一个一个表态，故意为没有 `_` 的穷尽匹配。
 ///
 /// 以后新增一条错误，编译器会逼着在这里说它是哪一类——
 /// "每条错误都带定位信息"这句话才不会只剩文案里的一句承诺。
@@ -68,6 +68,13 @@ fn locator(e : @moonmeta.MetaError) -> Locator {
     @moonmeta.BadChecksum(off, _, _) => Site(off)
     // ifd0 偏移过 check_ifd_offset 的验，所以这一条是块内偏移而不是指针
     @moonmeta.TiffNotByteExact(off, _, _) => Site(off.to_int())
+    // 冲突区间的起点出自守卫清单，清单里的偏移都过了解析侧的边界检查。
+    @moonmeta.TiffInplaceShared(_, from, _, _, _) => Site(from)
+    // 走到第二次的那张表，偏移同样来自已过界的指针。
+    @moonmeta.TiffInplaceCycle(off) => Site(off)
+    // 这一条反过来：报错就是因为像素声明里那两个数字不可信，
+    // 拿块长去要求它反而是错的。定位只能靠 tag。
+    @moonmeta.TiffInplaceOpaque(_, _) => TagOnly
     @moonmeta.UnknownFormat(off) => Site(off)
   }
 }
@@ -86,6 +93,8 @@ struct Sweep {
   mut decoded : Int
   mut redacted : Int
   mut stripped : Int
+  mut inplace_redacted : Int
+  mut inplace_stripped : Int
 }
 
 ///|
@@ -99,6 +108,8 @@ fn new_sweep() -> Sweep {
     decoded: 0,
     redacted: 0,
     stripped: 0,
+    inplace_redacted: 0,
+    inplace_stripped: 0,
   }
 }
 
@@ -239,7 +250,53 @@ fn check_stripped(out : Bytes, at : String, s : Sweep) -> Unit raise {
 }
 
 ///|
-/// 一份输入进来，五个入口全部走一遍。
+/// 原位那条路的检查。
+///
+/// 长度不变是它对用户的全部承诺，所以这一格先钉字节、再钉读得回来：
+/// 搬了字节就不叫原位，哪怕产物本身没问题。
+/// 剩下的条目不许是敏感条目——这一条与重写路径同宽；至于像素声明那一批
+/// 必须留着，那是 `ci/inplace_crosscheck.py` 对着真文件核的事，
+/// 拿它当"审不剩敏感"来断言会把两种口径混成一种。
+fn check_inplace(
+  data : Bytes,
+  out : Bytes,
+  removed : Bool,
+  decoded : Bool,
+  at : String,
+) -> Unit raise {
+  if out.length() != data.length() {
+    fail(
+      "\{at} 说好了不搬字节，长度却从 \{data.length()} 变成 \{out.length()}",
+    )
+  }
+  // 什么都没删就不许动文件——空策略、以及策略只覆盖时间戳却喂 strict 之外
+  // 的输入，两种形状都从这里过。
+  if !removed && out != data {
+    fail("\{at} 一条都没删，产物却和输入不同")
+  }
+  if !decoded {
+    // 原位这条路故意能吃下 decode_any 会拒绝的文件（不认识的类型码也要
+    // 能摘掉），所以输入本身读不回来时，后面那两句没有对象。
+    return
+  }
+  try @moonmeta.decode_any(out) catch {
+    e => fail("\{at} 的产物自己读不回来：\{e}")
+  } noraise {
+    (_, block) =>
+      match block {
+        None => ()
+        Some(b) => {
+          let left = b.findings(@moonmeta.strict_policy())
+          if left.length() > 0 {
+            fail("\{at} 之后还能审出 \{left.length()} 条敏感条目")
+          }
+        }
+      }
+  }
+}
+
+///|
+/// 一份输入进来，七个入口全部走一遍。
 ///
 /// `sniff` 是全函数，没有 catch：它一旦抛，整个测试进程当场挂掉，
 /// 那正是性质 1 要的样子。
@@ -247,11 +304,16 @@ fn probe(data : Bytes, at : String, s : Sweep) -> Unit raise {
   s.inputs = s.inputs + 1
   let len = data.length()
   let _ = @moonmeta.sniff(data)
+  let decoded_at = s.decoded
   try @moonmeta.decode_any(data) catch {
     e => tally(e, len, "\{at} decode_any", s)
   } noraise {
     _ => s.decoded = s.decoded + 1
   }
+  // 读不通的输入不是"删完还读得回来"这句话的对象：原位那两条入口故意
+  // 能吃下 decode_any 拒绝的文件（不认识的类型码也要能摘掉），所以这一票
+  // 只能按输入自己能不能读来打。
+  let decoded = s.decoded > decoded_at
   try @moonmeta.describe_container(data) catch {
     e => tally(e, len, "\{at} describe_container", s)
   } noraise {
@@ -266,6 +328,34 @@ fn probe(data : Bytes, at : String, s : Sweep) -> Unit raise {
     e => tally(e, len, "\{at} strip_any", s)
   } noraise {
     (out, _) => check_stripped(out, at, s)
+  }
+  try @moonmeta.tiff_redact_inplace(data, @moonmeta.strict_policy()) catch {
+    e => tally(e, len, "\{at} tiff_redact_inplace", s)
+  } noraise {
+    (out, rep) => {
+      s.inplace_redacted = s.inplace_redacted + 1
+      check_inplace(
+        data,
+        out,
+        rep.removed.length() > 0 || rep.dropped_xmp,
+        decoded,
+        "\{at} tiff_redact_inplace",
+      )
+    }
+  }
+  try @moonmeta.tiff_strip_inplace(data) catch {
+    e => tally(e, len, "\{at} tiff_strip_inplace", s)
+  } noraise {
+    (out, had) => {
+      s.inplace_stripped = s.inplace_stripped + 1
+      check_inplace(
+        data,
+        out,
+        had.had_exif || had.dropped_xmp,
+        decoded,
+        "\{at} tiff_strip_inplace",
+      )
+    }
   }
 }
 
@@ -349,9 +439,13 @@ test "畸形输入：不 panic、错误可追问、删完还读得回来" {
   println(
     "  定位分类：块内偏移 \{s.sites} 条，越界指针 \{s.pointers} 条，只有 tag \{s.tag_only} 条",
   )
+  println(
+    "  原位两路：脱敏产出 \{s.inplace_redacted} 份，拆解产出 \{s.inplace_stripped} 份",
+  )
   // 地板：扫描一旦不再覆盖这些形状，上面所有断言都会悄悄变成空话。
-  // 数值取实测基线的约三分之二（基线：12000 / 23598 / 17926 / 4476 / 1196 /
-  // 6084 / 4879 / 6123），只朝一个方向咬：覆盖率掉了才红，加了不会红。
+  // 数值取实测基线的约三分之二（基线：12000 / 45119 / 37685 / 5882 / 1552 /
+  // 6084 / 4889 / 6133 / 原位 1233 / 1226），只朝一个方向咬：覆盖率掉了才红，
+  // 加了不会红。
   floor("输入份数", s.inputs, 8000)
   floor("被拒次数", s.raised, 15000)
   floor("块内偏移条数", s.sites, 12000)
@@ -360,4 +454,6 @@ test "畸形输入：不 panic、错误可追问、删完还读得回来" {
   floor("读通次数", s.decoded, 3000)
   floor("脱敏产出次数", s.redacted, 2500)
   floor("拆解产出次数", s.stripped, 3000)
+  floor("原位脱敏产出次数", s.inplace_redacted, 800)
+  floor("原位拆解产出次数", s.inplace_stripped, 800)
 }

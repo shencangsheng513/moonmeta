@@ -17,6 +17,11 @@
 再按"按设计拒绝"记进分母——绿得理直气壮。只有拿这个文件的字节反着算一遍，
 才分得出"这条拒绝真是设计内的"和"这句话是编的"。
 
+最后一组 `FallbackNote` 钉的是**兜底文案本身**：那句"没有任何一句形状能被
+字节复核"在四批语料上一格都不命中（命中过一次的话，上一轮第二趟里那个未定义
+的名字早就炸了），所以它是那种"语料永远查不出来"的话——只能在这里钉：引擎那
+一句必须原样带出来，拿不到错误句时也不许崩。
+
 跑法（不需要语料，也不需要 moon）：
 
     python ci/crosscheck_selftest.py -v
@@ -31,11 +36,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from crosscheck_real import (  # noqa: E402
+    DIRS,
     TIFF_TYPE_SIZES,
     XMP_MARKS,
     gps_via_exif_pointer,
+    forgive_disclosed_thumbnail,
+    jpeg_segments,
+    metadata_block,
+    metadata_signatures,
     nested_gps_entries,
+    no_shape_note,
     out_dir_inside_corpus,
+    pillow_dirs,
+    png_chunks,
     privacy_expectations,
     read_refusal,
     strip_claims,
@@ -454,6 +467,27 @@ def say_not_png(off):
     return "x.png: not a PNG: the 8-byte signature differs at offset {}".format(off)
 
 
+# 容器级那三句。整句话由 moonmeta_error_wbtest.mbt 钉着，这里是同一句的带数版本：
+# 换措辞会先红在 `moon test` 里，红不到这里来——所以这里的正则与那边必须同形。
+def say_second_block(off):
+    return (
+        "x.jpg: a second metadata block sits at offset {}; removing only the "
+        "first one would be a fake redaction"
+    ).format(off)
+
+
+def say_runs_out(off):
+    return "x.jpg: the file runs out at offset {}, in the middle of a segment table".format(
+        off
+    )
+
+
+def say_short_block(need, off, have):
+    return "x.jpg: need {} byte(s) at offset {} but the block holds only {}".format(
+        need, off, have
+    )
+
+
 def make_tiff(rows, extra=(), ifd0=8, little=True):
     """合成一张最小裸 TIFF：头 +（空洞补零）+ 主 IFD + 排在它后面的子 IFD。
 
@@ -593,6 +627,202 @@ class TiffWalk(unittest.TestCase):
         # 编不出宽度的类型码不许硬凑一个数：那一格只能退回分诊
         blob = make_tiff([(0x0212, 4099, 7, 65536)])
         self.assertEqual(tiff_entry_claims(blob)[0x0212], [(4099, None, None, 65536)])
+
+
+def jpeg_app1(payload, marker=0xE1):
+    """一个变长段：0xff + 段码 + 2 字节大端长度（长度把自己算在内）+ 载荷。"""
+    seg_len = len(payload) + 2
+    return bytes([0xFF, marker]) + seg_len.to_bytes(2, "big") + payload
+
+
+def make_jpeg(*segments):
+    return b"\xff\xd8" + b"".join(segments)
+
+
+def exif_app1(block):
+    """装着一块 TIFF 的 APP1：签名那 6 字节在前，块从偏移 0 起就是它的字节。"""
+    return jpeg_app1(b"Exif\x00\x00" + block)
+
+
+def png_chunk(kind, payload):
+    """一个 PNG 块：长度(4) + 类型(4) + 载荷 + 校验和(4)。"""
+    return len(payload).to_bytes(4, "big") + kind + payload + b"\x00" * 4
+
+
+def make_png(*chunks):
+    return b"\x89PNG\r\n\x1a\n" + b"".join(chunks)
+
+
+class ContainerRefusal(unittest.TestCase):
+    # 三把容器级尺子（第二份元数据块 / 断在段表中间 / 块装不下）。
+    # 为什么必须在这里钉：偏移是库报的，语料只会把同一句谎话原样收下再记进
+    # "按设计拒绝"的分母——绿得理直气壮。这里每个桶都正反各一格。
+    def setUp(self):
+        self.block = b"II" + (42).to_bytes(2, "little") + (8).to_bytes(4, "little")
+        # 载荷起于偏移 6（SOI 2 + 0xff/段码/长度 4），块从 12 起。
+        self.jpg = make_jpeg(exif_app1(self.block))
+
+    def test_签名单按容器各自数(self):
+        # 裸 TIFF 没有段表 / 块表，一份也算不出来——"第二份"那句本来就不该
+        # 在它身上判；拿整个文件当清单会让任何偏移都"复核得上"。
+        self.assertEqual(metadata_signatures(self.jpg), [6])
+        self.assertEqual(
+            metadata_signatures(make_png(png_chunk(b"eXIf", self.block))), [8]
+        )
+        self.assertEqual(metadata_signatures(self.block), [])
+
+    # ---- 第二份元数据块 ----
+
+    def test_第二份的偏移对得上_算设计内(self):
+        first = self.jpg
+        second = exif_app1(self.block)
+        blob = first + second
+        off = len(first) + 4  # 第二个 APP1 的签名起始
+        self.assertEqual(blob[off : off + 6], b"Exif\x00\x00")
+        bucket, notes = read_refusal(say_second_block(off), blob)
+        self.assertEqual(bucket, "designed-second-metadata-block", notes)
+
+    def test_偏移上根本没有签名_数字复核不上(self):
+        first = self.jpg
+        blob = first + exif_app1(self.block)
+        bucket, notes = read_refusal(say_second_block(len(blob) - 2), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_说第二份其实是第一份_要红(self):
+        # "只删第一份就是假脱敏"这句要靠"它前面还有一份"撑着：报第一份的偏移
+        # 时那句不成立，不许混进设计内。
+        blob = make_jpeg(exif_app1(self.block))
+        bucket, notes = read_refusal(say_second_block(6), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("前面一份都没有", notes[0])
+
+    def test_PNG认的是块起点不是签名(self):
+        one = png_chunk(b"eXIf", self.block)
+        blob = make_png(one, one)
+        off = 8 + len(one)
+        bucket, notes = read_refusal(say_second_block(off), blob)
+        self.assertEqual(bucket, "designed-second-metadata-block", notes)
+
+    def test_第二份是XMP包也数得到(self):
+        # 清单只数 Exif 签名的话，"EXIF + XMP"这种文件会说"偏移上没有签名"，
+        # 而引擎那两处 raise 都认 XMP——两个方向都得放行。
+        blob = self.jpg + jpeg_app1(URI + b"\x00<p/>")
+        off = len(self.jpg) + 4  # 第二个 APP1 的签名起始
+        self.assertEqual(blob[off : off + len(URI)], URI)
+        self.assertIn(off, metadata_signatures(blob))
+        bucket, notes = read_refusal(say_second_block(off), blob)
+        self.assertEqual(bucket, "designed-second-metadata-block", notes)
+
+    def test_PNG那句偏移上是IDAT时要红(self):
+        # eXIf 只有一个，句子里那个偏移落在一个普通块上：既不是"第二份"，
+        # 也不在清单里——不许混进设计内。
+        blob = make_png(
+            png_chunk(b"eXIf", self.block), png_chunk(b"IDAT", b"more")
+        )
+        off = 8 + 12 + len(self.block)
+        bucket, notes = read_refusal(say_second_block(off), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    # ---- 断在段表 / 块表中间 ----
+
+    def test_段表停处一致_算设计内(self):
+        # 一个长度声明 10 的段，载荷只有 2 字节：走查读到段尾之后撞在非 0xff 上。
+        blob = make_jpeg(jpeg_app1(b"ab"), b"\x00\x00\x00\x00")
+        _segs, stop, why = jpeg_segments(blob)
+        self.assertEqual(why, "no-0xff")
+        bucket, notes = read_refusal(say_runs_out(stop), blob)
+        self.assertEqual(bucket, "designed-truncated-segments", notes)
+
+    def test_谎报断点_要红(self):
+        blob = make_jpeg(jpeg_app1(b"ab"), b"\x00\x00\x00\x00")
+        _segs, stop, _why = jpeg_segments(blob)
+        bucket, notes = read_refusal(say_runs_out(stop + 1), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("我这遍走段表停在", notes[0])
+
+    def test_段长越界不是断在段表中间(self):
+        # 引擎在那种情况下说的是另一句（segment ... only N left）；
+        # 拿"断掉"那句来套同一个文件必须打红。
+        blob = b"\xff\xd8\xff\xe1" + (100).to_bytes(2, "big") + b"ab"
+        _segs, stop, why = jpeg_segments(blob)
+        self.assertEqual(why, "segment-runs-off-end")
+        self.assertGreater(stop, len(blob))
+        bucket, notes = read_refusal(say_runs_out(stop), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("而那句说的是「断在段表中间」", notes[0])
+
+    def test_PNG块头都放不下_算设计内(self):
+        blob = make_png(png_chunk(b"IDAT", b"xyz")) + b"\x00" * 5
+        _c, stop, why = png_chunks(blob)
+        self.assertEqual(why, "no-chunk-header")
+        bucket, notes = read_refusal(say_runs_out(stop), blob)
+        self.assertEqual(bucket, "designed-truncated-segments", notes)
+
+    # ---- 块装不下固定字节数 ----
+
+    def test_块长对得上_算设计内(self):
+        # 块只有 6 字节，TIFF 头要 8 字节——正是那句"块只有 N 字节"。
+        blob = make_jpeg(exif_app1(b"II*\x00\x08\x00"))
+        self.assertEqual(len(metadata_block(blob)), 6)
+        bucket, notes = read_refusal(say_short_block(8, 0, 6), blob)
+        self.assertEqual(bucket, "designed-short-block", notes)
+
+    def test_谎报块长_要红(self):
+        blob = make_jpeg(exif_app1(b"II*\x00\x08\x00"))
+        self.assertEqual(len(metadata_block(blob)), 6)
+        bucket, notes = read_refusal(say_short_block(8, 0, 99), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那个数字复核不上", notes[0])
+
+    def test_装得下却说不行_要红(self):
+        blob = make_jpeg(exif_app1(b"II*\x00\x08\x00\x00\x00\x00\x00"))
+        self.assertEqual(len(metadata_block(blob)), 10)
+        bucket, notes = read_refusal(say_short_block(8, 0, 10), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("那句不成立", notes[0])
+
+    def test_容器里的块内偏移核的是块长(self):
+        # 这就是 55 张首测里 hopper_bad_exif 那个形状：容器是好的，块是坏的。
+        # 那句"偏移 10 之后只剩 20 字节"只有拿段表算出的块长（30）才对得上；
+        # read_refusal 里把 view 换回整个文件，这一格立刻红。
+        block = (
+            b"II"
+            + (42).to_bytes(2, "little")
+            + (8).to_bytes(4, "little")
+            + (11).to_bytes(2, "little")
+            + b"\x00" * 20
+        )
+        blob = make_jpeg(exif_app1(block))
+        self.assertEqual(len(metadata_block(blob)), 30)
+        bucket, notes = read_refusal(say_declares("0x0000", 10, 132, 20), blob)
+        self.assertEqual(bucket, "designed-truncated-value", notes)
+
+    def test_拿整个文件长凑的剩余字节数要红(self):
+        block = (
+            b"II"
+            + (42).to_bytes(2, "little")
+            + (8).to_bytes(4, "little")
+            + (11).to_bytes(2, "little")
+            + b"\x00" * 20
+        )
+        blob = make_jpeg(exif_app1(block))
+        self.assertGreater(len(blob), 30)
+        bucket, notes = read_refusal(
+            say_declares("0x0000", 10, 132, len(blob) - 10), blob
+        )
+        self.assertIsNone(bucket)
+        self.assertIn("两数对不上", notes[0])
+
+    def test_块边界算不出来不许当通过(self):
+        # 一个没有 APP1 的 JPEG：块无从谈起，那句"块只有 7 字节"既不能放行
+        # 也不能被"没这句话的形状"混过去——要出声，落进分诊。
+        blob = make_jpeg(jpeg_app1(b"JFIF\x00\x01"), b"\xff\xd9")
+        self.assertIsNone(metadata_block(blob))
+        bucket, notes = read_refusal(say_short_block(8, 0, 7), blob)
+        self.assertIsNone(bucket)
+        self.assertIn("无从复核", notes[0])
 
 
 class ReadRefusal(unittest.TestCase):
@@ -791,6 +1021,88 @@ class TiffTypeSizes(unittest.TestCase):
     def test_规范没给的编号不许有宽度(self):
         for code in (0, 14, 99, -1):
             self.assertNotIn(code, TIFF_TYPE_SIZES)
+
+
+class ThumbnailForgiveness(unittest.TestCase):
+    # "缩略图指针没了"这一格只在命令行当场说过的时候才豁免。
+    # 抄一份编号名单放行会让"条目消失但工具一个字没提"变成全绿——
+    # 那正是这一格存在的理由，所以四个方向都要钉。
+    SAID = "删除 4 条，并丢掉可能自带坐标的缩略图。"
+    UNSAID = "删除 4 条。"
+
+    def test_披露过的缩略图指针算设计内(self):
+        lost = [("IFD0", 0x0201), ("IFD0", 0x0202)]
+        self.assertEqual(forgive_disclosed_thumbnail(lost, self.SAID), [])
+
+    def test_没说过的同样两格仍然要红(self):
+        lost = [("IFD0", 0x0201), ("IFD0", 0x0202)]
+        self.assertEqual(
+            forgive_disclosed_thumbnail(lost, self.UNSAID), lost
+        )
+
+    def test_别的编号不许被这句话放行(self):
+        lost = [("IFD0", 0x013B), ("IFD0", 0x0202)]
+        self.assertEqual(
+            forgive_disclosed_thumbnail(lost, self.SAID), [("IFD0", 0x013B)]
+        )
+
+    def test_同一个编号挂在别的目录也不放行(self):
+        # 0x0201 在 GPS 目录里是 GPSLatitude：它没了绝不是缩略图的事
+        lost = [("GPS", 0x0201)]
+        self.assertEqual(
+            forgive_disclosed_thumbnail(lost, self.SAID), [("GPS", 0x0201)]
+        )
+
+    def test_输出为空时一律不豁免(self):
+        self.assertEqual(
+            forgive_disclosed_thumbnail([("IFD0", 0x0202)], ""),
+            [("IFD0", 0x0202)],
+        )
+
+
+class RulerRefusesProduct(unittest.TestCase):
+    # 量尺读不出来时必须返回 None，而且**不许**把异常抛出去：
+    # 上一批外来语料里我们的产物不是合法 JPEG，`pillow_dirs` 直接把整批
+    # 跑批在 12/55 处崩掉——一个红都没数到，看起来像"脚本坏了"而不是
+    # "我们写坏了文件"。反向对照同样钉在这里：只写 `return None` 的
+    # 实现会让每一格都变成"跳过"，全绿。
+    def test_不是图的文件返回None不抛(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "not-an-image.jpg"
+            p.write_bytes(b"\xff\xd8\xff\xe1 this is not a jpeg at all")
+            self.assertIsNone(pillow_dirs(p))
+
+    def test_根本不存在的路径也只返回None(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(pillow_dirs(Path(td) / "missing.png"))
+
+    def test_真图照常返回四张目录(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "real.png"
+            Image.new("RGB", (4, 3), (10, 20, 30)).save(p)
+            out = pillow_dirs(p)
+            self.assertIsNotNone(out)
+            self.assertEqual(sorted(out.keys()), sorted(DIRS))
+            self.assertEqual(out["IFD0"], set())
+
+
+class FallbackNote(unittest.TestCase):
+    # 兜底那句是"复核不上"时唯一给人看的东西：把它写成固定文案，红就变成
+    # 一句没有出处的话；把参数写成 None 就干脆崩在这条路上。
+    # 上一轮第二趟就地抄了一遍这句话、抄来了一个作用域里没有的名字，
+    # 命中就是 NameError——所以两趟现在共用 no_shape_note，这一格钉住它。
+    def test_引擎那一句必须出现在兜底里(self):
+        sentence = "tag 0x0112 uses TIFF type 99, which TIFF 6.0 does not define"
+        note = no_shape_note(sentence)
+        self.assertIn("读侧失败", note)
+        self.assertIn(sentence, note)
+
+    def test_err为空也要出一句完整话不崩(self):
+        for err in (None, ""):
+            note = no_shape_note(err)
+            self.assertTrue(note.startswith("读侧失败"))
 
 
 if __name__ == "__main__":

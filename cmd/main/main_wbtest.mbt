@@ -37,7 +37,8 @@ fn describe(r : Request) -> String {
   }
   let force = if r.force { " force" } else { "" }
   let json = if r.json { " json" } else { "" }
-  "\{action} \{r.path} \{r.policy} -o=\{out}\{force}\{json}"
+  let kb = if r.keep_bytes { " keep-bytes" } else { "" }
+  "\{action} \{r.path} \{r.policy} -o=\{out}\{force}\{json}\{kb}"
 }
 
 ///|
@@ -390,4 +391,123 @@ test "--json 只挂在 read 与 audit 上，写操作不认这个旗标" {
   )
   @test.assert_eq(act(["redact", "a.jpg", "--json"]), "解析失败")
   @test.assert_eq(act(["strip", "a.jpg", "--json"]), "解析失败")
+}
+
+///|
+/// 一条只带三条 IFD0 条目的裸 TIFF，回写再解回来就是三条。
+/// `kept_image_entries` 数的就是它——故意不从计划里抄数。
+fn three_entries() -> @lib.TiffBlock {
+  {
+    little: true,
+    ifd0: [
+      { tag: 256, type_code: 3, value: @lib.Shorts([8]), },
+      { tag: 257, type_code: 3, value: @lib.Shorts([8]), },
+      { tag: 273, type_code: 4, value: @lib.Longs([100L]), },
+    ],
+    exif: [],
+    gps: [],
+    interop: [],
+    has_ifd1: false,
+  }
+}
+
+///|
+/// 旗标挂错地方要在解析阶段就炸，而不是"看起来生效了"。
+/// 子命令后面也不行：`--keep-bytes` 是 redact / strip 的旗标，read / audit 不认。
+test "--keep-bytes 只挂在两个写操作上，而且必须跟在子命令之后" {
+  @test.assert_eq(
+    act(["redact", "a.tif", "--keep-bytes"]),
+    "redact a.tif privacy -o=- keep-bytes",
+  )
+  @test.assert_eq(
+    act(["strip", "a.tif", "--keep-bytes"]),
+    "strip a.tif privacy -o=- keep-bytes",
+  )
+  @test.assert_eq(act(["read", "a.tif", "--keep-bytes"]), "解析失败")
+  @test.assert_eq(act(["audit", "a.tif", "--keep-bytes"]), "解析失败")
+  @test.assert_eq(act(["--keep-bytes", "redact", "a.tif"]), "解析失败")
+}
+
+///|
+/// 走哪条写路是三个条件的与。少一条都不许走：`inplace_mode` 与
+/// `choose_inplace` 是同一条判据的两种说法（后者在 JPEG 上还要出声一句
+/// "这里不改变任何行为"——那句话只能人工看终端，这里钉的是它的返回值）。
+test "旗标 + 容器 + 链：三者齐了才走原位" {
+  @test.assert_eq(
+    inplace_mode({ keep_bytes: true, kind: @lib.Tiff, chain: true, }),
+    true,
+  )
+  @test.assert_eq(
+    inplace_mode({ keep_bytes: false, kind: @lib.Tiff, chain: true, }),
+    false,
+  )
+  @test.assert_eq(
+    inplace_mode({ keep_bytes: true, kind: @lib.Jpeg, chain: false, }),
+    false,
+  )
+  @test.assert_eq(
+    choose_inplace({ keep_bytes: true, kind: @lib.Tiff, chain: false, }),
+    true,
+  )
+  @test.assert_eq(
+    choose_inplace({ keep_bytes: true, kind: @lib.Jpeg, chain: false, }),
+    false,
+  )
+  @test.assert_eq(
+    choose_inplace({ keep_bytes: false, kind: @lib.Tiff, chain: true, }),
+    false,
+  )
+}
+
+///|
+/// 那句承诺的两个分支各说什么：有链要说清"不碰它、里面可能另有一份坐标、
+/// 要连它一起清就别加旗标"；没链不许冒认"链还在"。
+test "原位承诺：长度与链，两种说法都不许多承诺" {
+  let with_chain = inplace_said(97123, true)
+  let no_chain = inplace_said(97123, false)
+  assert_true(with_chain.contains("文件长度不变（97123 字节"))
+  assert_true(no_chain.contains("文件长度不变（97123 字节"))
+  assert_true(with_chain.contains("还有一条缩略图目录链"))
+  assert_true(with_chain.contains("里面可能另有一份坐标"))
+  assert_true(with_chain.contains("别加 --keep-bytes"))
+  assert_true(no_chain.contains("没有缩略图目录链"))
+  assert_true(!no_chain.contains("还有一条缩略图目录链"))
+  assert_true(!no_chain.contains("里面可能另有一份坐标"))
+}
+
+///|
+/// `has_chain` 的三态：链在、链不在、这个容器根本没有 TIFF 块（JPEG / PNG）。
+/// 第三种最容易混进"没有"——它说的是"这一层看不见"，而那句话要说的是文件。
+test "链的三态：有、没有、容器里没有这一块" {
+  let yes : @lib.TiffBlock = {
+    little: true,
+    ifd0: [],
+    exif: [],
+    gps: [],
+    interop: [],
+    has_ifd1: true,
+  }
+  let no = three_entries()
+  @test.assert_eq(has_chain(Some(yes)), true)
+  @test.assert_eq(has_chain(Some(no)), false)
+  @test.assert_eq(has_chain(None), false)
+}
+
+///|
+/// 那句"留着几条解码字段"的数必须从产物读回来：解不开就是 0，
+/// 0 就不说这一句。抄计划里的数，等于替一个没发生的产物背书。
+test "原位 strip 的条数从产物里数，读不通就一句都不说" {
+  let out = @lib.encode_tiff(three_entries())
+  @test.assert_eq(kept_image_entries(out), 3)
+  let s = inplace_strip_said({ had_exif: true, dropped_xmp: false, }, out)
+  assert_true(s.contains("IFD0 里留着 3 条"))
+  assert_true(s.contains("EXIF"))
+  // 一份根本不是 TIFF 的字节：数不出条数，那句话也就不许出现
+  let junk = Bytes::from_array([
+    b'I', b'Q', b'*', b'\x00', b'\x08', b'\x00', b'\x00', b'\x00',
+  ])
+  @test.assert_eq(kept_image_entries(junk), 0)
+  let g = inplace_strip_said({ had_exif: false, dropped_xmp: false, }, junk)
+  assert_true(g.contains("一个字节都没改"))
+  assert_true(!g.contains("IFD0 里留着"))
 }

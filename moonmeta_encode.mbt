@@ -228,7 +228,9 @@ fn value_bytes(
         }
         bytes.push(cp.to_byte())
       }
-      bytes.push(b'\x00')
+      // 一个字节都不补：读侧已经把 count 个字节（含结尾 NUL、含填充 NUL）
+      // 原样交过来了，这里再补一个就会把"没有结尾 NUL"的条目撑长一字节。
+      // 自己构造 Text 又要符合 EXIF 惯例的话，结尾的 NUL 由构造方带上。
       (bytes.length(), bytes)
     }
     (1 | 6 | 7, Raw(bs)) => {

@@ -22,7 +22,23 @@ struct Request {
   out : String?
   policy : String
   force : Bool
+  keep_bytes : Bool
   json : Bool
+}
+
+///|
+/// 决定"走哪条写路"要用的三件事，打包传：旗标、容器、以及这份文件里有没有
+/// 一条原地模式不碰的目录链。第三件必须一起传：只报 `dropped_thumbnail: false`
+/// 说不清"没有链"和"有链但这次不动它"。
+struct WriteMode {
+  keep_bytes : Bool
+  kind : @lib.Kind
+  chain : Bool
+}
+
+///|
+fn write_mode(req : Request, kind : @lib.Kind, chain : Bool) -> WriteMode {
+  { keep_bytes: req.keep_bytes, kind, chain, }
 }
 
 ///|
@@ -93,14 +109,14 @@ fn command() -> @argparse.Command {
           @argparse.PositionArg("file", about="要脱敏的图片文件"),
         ],
         options=[policy_option(), output_option()],
-        flags=[force_flag()],
+        flags=[force_flag(), keep_bytes_flag()],
       ),
       @argparse.Command(
         "strip",
         about="整段摘掉元数据，结果写到新文件",
         positionals=[@argparse.PositionArg("file", about="要清空的文件")],
         options=[output_option()],
-        flags=[force_flag()],
+        flags=[force_flag(), keep_bytes_flag()],
       ),
     ],
   )
@@ -128,6 +144,17 @@ fn force_flag() -> @argparse.FlagArg {
   @argparse.FlagArg(
     "force",
     about="允许把结果写回输入文件，默认不允许",
+  )
+}
+
+///|
+/// 裸 TIFF 的两条写路：重建整份文件（默认），或者一个字节都不搬、
+/// 只把目录表原地收缩。后者能处理真实照片（IFD 后面就是像素），
+/// 代价是缩略图链与像素都不碰，所以删不完的东西也就不假装删完了。
+fn keep_bytes_flag() -> @argparse.FlagArg {
+  @argparse.FlagArg(
+    "keep-bytes",
+    about="裸 TIFF 改为原位收缩目录：文件长度不变，像素与缩略图一个字节不动",
   )
 }
 
@@ -162,6 +189,7 @@ fn to_request(matches : @argparse.Matches) -> Request? {
             out: one(sub, "output"),
             policy: or_else(one(sub, "policy"), "privacy"),
             force: sub.flags.get("force") == Some(true),
+            keep_bytes: sub.flags.get("keep-bytes") == Some(true),
             json: sub.flags.get("json") == Some(true),
           })
       }
@@ -248,6 +276,7 @@ fn dispatch(
   p : @lib.Policy,
 ) -> Int {
   let xmp = carrier_present(data, kind)
+  let mode = write_mode(req, kind, has_chain(block))
   match req.action {
     Read =>
       if req.json {
@@ -263,8 +292,8 @@ fn dispatch(
       } else {
         show_audit(req.path, req.policy, block, p, xmp)
       }
-    Redact => redact_file(req, data, p, xmp)
-    Strip => strip_file(req, data)
+    Redact => redact_file(req, data, mode, p, xmp)
+    Strip => strip_file(req, data, mode)
   }
 }
 
@@ -578,8 +607,14 @@ fn carrier_note(p : @lib.Policy) -> String {
 }
 
 ///|
-fn redact_file(req : Request, data : Bytes, p : @lib.Policy, xmp : Bool) -> Int {
-  let (bytes, report) = @lib.redact_any(data, p) catch {
+fn redact_file(
+  req : Request,
+  data : Bytes,
+  mode : WriteMode,
+  p : @lib.Policy,
+  xmp : Bool,
+) -> Int {
+  let (bytes, report) = redact_by(data, mode, p) catch {
     e => {
       println("\{req.path}: \{e}")
       return 1
@@ -593,6 +628,83 @@ fn redact_file(req : Request, data : Bytes, p : @lib.Policy, xmp : Bool) -> Int 
     "删除 \{n} 条\{thumbnail_note(report.dropped_thumbnail)}\{xmp_note(xmp, report.dropped_xmp)}。",
   )
   write_result(req, bytes)
+}
+
+///|
+/// 走哪条写路。
+///
+/// `--keep-bytes` 只有裸 TIFF 需要：JPEG / PNG 本来就是"只换装元数据的那一段"，
+/// 其余字节原样搬回去。在那两种容器上这个旗标什么都不改，所以要说一句
+/// "这里不适用"，而不是安静地按原路走——安静地接受一个被忽略的旗标，
+/// 等于教会用户相信它生效了。
+fn redact_by(
+  data : Bytes,
+  mode : WriteMode,
+  p : @lib.Policy,
+) -> (Bytes, @lib.Redaction) raise @lib.MetaError {
+  if !choose_inplace(mode) {
+    @lib.redact_any(data, p)
+  } else {
+    // 先落笔再声明：那句"长度不变"是做完的凭证。原位模式在半路拒绝时
+    // （语料里真有一例：某个条目的类型码这一版不解码）如果话已经先说出去，
+    // 用户拿到的就是"长度不变"+"我没做"两句同时成立的话。
+    let done = @lib.tiff_redact_inplace(data, p)
+    println(inplace_said(data.length(), mode.chain))
+    done
+  }
+}
+
+///|
+/// 同上的 strip 版。那句承诺同样只能在落笔成功之后说。
+fn strip_by(
+  data : Bytes,
+  mode : WriteMode,
+) -> (Bytes, @lib.Strip) raise @lib.MetaError {
+  if !choose_inplace(mode) {
+    @lib.strip_any(data)
+  } else {
+    let done = @lib.tiff_strip_inplace(data)
+    println(inplace_said(data.length(), mode.chain))
+    done
+  }
+}
+
+///|
+fn choose_inplace(mode : WriteMode) -> Bool {
+  if !mode.keep_bytes {
+    false
+  } else if mode.kind == @lib.Tiff {
+    true
+  } else {
+    println(
+      "这个容器是 \{mode.kind}，本来就不搬字节：--keep-bytes 在这里不改变任何行为。",
+    )
+    false
+  }
+}
+
+///|
+/// 原位模式做完了要当场声明自己的边界：长度没变是它的承诺，
+/// 像素与缩略图链没动是它的代价。不说这一句，用户会以为
+/// `--keep-bytes` 出来的文件和默认那条路等价。
+///
+/// "这一条链还在"必须由文件本身的结构说出来：`dropped_thumbnail` 在原地
+/// 模式下永远是 false，它的意思是"这一次什么都没丢"，不是"这文件里没有"。
+/// 把两者混为一谈，就是让用户以为缩略图里的第二份坐标也没了。
+fn inplace_said(len : Int, chain : Bool) -> String {
+  if chain {
+    "原位模式：文件长度不变（\{len} 字节）。这份文件还有一条缩略图目录链，原位模式不碰它——里面可能另有一份坐标；要连它一起清就别加 --keep-bytes。"
+  } else {
+    "原位模式：文件长度不变（\{len} 字节），像素与缩略图链一个字节未动（这个文件没有缩略图目录链）。"
+  }
+}
+
+///|
+fn has_chain(block : @lib.TiffBlock?) -> Bool {
+  match block {
+    Some(b) => b.has_ifd1
+    None => false
+  }
 }
 
 ///|
@@ -622,15 +734,65 @@ fn thumbnail_note(dropped : Bool) -> String {
 }
 
 ///|
-fn strip_file(req : Request, data : Bytes) -> Int {
-  let (bytes, had) = @lib.strip_any(data) catch {
+fn strip_file(req : Request, data : Bytes, mode : WriteMode) -> Int {
+  let (bytes, had) = strip_by(data, mode) catch {
     e => {
       println("\{req.path}: \{e}")
       return 1
     }
   }
-  println(strip_said(had))
+  println(
+    if inplace_mode(mode) {
+      inplace_strip_said(had, bytes)
+    } else {
+      strip_said(had)
+    },
+  )
   write_result(req, bytes)
+}
+
+///|
+/// 走没走原位那条路。与 `choose_inplace` 同一判据，但不印任何东西：
+/// 这句话要说两遍，第二遍不该把"这里不适用"再播报一次。
+fn inplace_mode(mode : WriteMode) -> Bool {
+  mode.keep_bytes && mode.kind == @lib.Tiff
+}
+
+///|
+/// 原位 strip 说的是另一句话，因为它的承诺不一样。
+///
+/// 裸 TIFF 的图像说明（宽高、压缩、条带位置……）和元数据住在同一张 IFD0
+/// 表里：把它们一起删，产物就不再是一张图——门禁在 104 份陌生 TIFF 里量到
+/// 81 份因此解不出像素。所以这条路不许说"整段摘除"，它只能说"删掉所有不
+/// 参与解码的条目"，并且把留下的那些数出来。数字从产物里读回来，
+/// 不是从计划里抄：抄来的数只说明我们打算留什么。
+fn inplace_strip_said(had : @lib.Strip, out : Bytes) -> String {
+  let kept = kept_image_entries(out)
+  let head = if had.had_exif || had.dropped_xmp {
+    "原位摘除非解码条目：" + join_comma(strip_parts(had)) + "。"
+  } else {
+    "这个文件的 IFD0 里没有不参与解码的条目，一个字节都没改。"
+  }
+  if kept > 0 {
+    "\{head}IFD0 里留着 \{kept} 条图像解码必需的字段（宽高/压缩/条带位置…）：裸 TIFF 的图像说明与元数据在同一张表里，'整段摘除'在这里做不到。"
+  } else {
+    head
+  }
+}
+
+///|
+/// 产物里 IFD0 还剩几条条目。子目录指针不算：`decode_tiff` 把它们当成结构
+/// 摘出去了，剩下能数到的就真是"这张图怎么解出来"那部分。
+fn kept_image_entries(out : Bytes) -> Int {
+  let parsed = try @lib.decode_any(out) catch {
+    _ => None
+  } noraise {
+    (_, b) => b
+  }
+  match parsed {
+    Some(b) => b.ifd0.length()
+    None => 0
+  }
 }
 
 ///|

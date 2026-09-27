@@ -47,6 +47,19 @@ pub suberror MetaError {
   /// 裸 TIFF 的字节不止元数据：重建只能覆盖一部分，写回去就是丢掉其余
   /// （通常是像素数据）。拒绝写回：(IFD0 偏移, 文件长度, 重建长度)
   TiffNotByteExact(Int64, Int, Int)
+  /// 原位模式要清/要写的一段字节与"仍在被人使用"的区间重叠，拒绝：
+  /// (条目 tag，冲突区间起点，区间长度，被撞那段所属目录表的偏移，
+  ///  那段区间是什么的一句话)。
+  /// tag 记 0 表示冲突的是表体本身（搬槽位或清表尾），不是某条值。
+  TiffInplaceShared(Int, Int, Int, Int, String)
+  /// 原位模式走目录图时又遇到了已经走过的表：(该表偏移)。
+  /// 两份表叠在一起，改哪一份都对，但没人说得清哪一份是真的。
+  TiffInplaceCycle(Int)
+  /// 原位模式读不懂像素声明，拒绝：(条目 tag，读不懂哪一种)。
+  /// 第二个参数是哨兵码，不是 TIFF 类型码：0 = 配对的条目不在，
+  /// -1 = 配对的两条各数出不同个数的值，-2 = 声明的区间越出文件末尾；
+  /// 其余才是这条值的 TIFF 类型码（值压根不是偏移表）。
+  TiffInplaceOpaque(Int, Int)
   /// 开头既不是 JPEG 也不是 PNG 也不是 TIFF：(偏移)
   UnknownFormat(Int)
 } derive(Debug)
@@ -126,6 +139,18 @@ pub impl Show for MetaError with fn output(self : MetaError, logger) {
       logger.write_string(
         "refusing to rewrite this bare TIFF: its IFD0 sits at offset \{ifd0}, and the file's \{len} byte(s) are not what the metadata model rebuilds (\{rebuilt} byte(s)); the difference is bytes the model does not hold, and writing would drop them",
       )
+    TiffInplaceShared(tag, from, len, owner, what) =>
+      logger.write_string(
+        "refusing to write this bare TIFF in place: tag \{tag_hex(tag)} would write offsets \{from}..\{from + len}, but those bytes are already \{what} (of the table at offset \{owner}); in-place mode never moves bytes, and it will not guess which of the two uses is the real one",
+      )
+    TiffInplaceCycle(off) =>
+      logger.write_string(
+        "refusing to write this bare TIFF in place: the table at offset \{off} is reached twice, so the file holds two readings of the same bytes and there is no way to say which one a viewer would use",
+      )
+    TiffInplaceOpaque(tag, code) =>
+      logger.write_string(
+        "refusing to write this bare TIFF in place: tag \{tag_hex(tag)} declares where the pixel data sits, but \{opaque_form(code)}; guessing wrong would delete the image, so the file is left untouched",
+      )
     UnknownFormat(off) =>
       logger.write_string(
         "none of the JPEG, PNG or TIFF magics is at offset \{off}; the container cannot be identified",
@@ -144,6 +169,28 @@ fn tag_hex(tag : Int) -> String {
   "0x" +
   ((tag >> 8) & 0xff).to_byte().to_hex() +
   (tag & 0xff).to_byte().to_hex()
+}
+
+///|
+/// 原位模式拒绝时，那句"看不懂"要说清是哪一种看不懂。第二个参数是哨兵码，
+/// 不是 TIFF 类型码：0/-1/-2 分别对应缺半边、伙伴条数不等、声明越出文件末尾，
+/// 只有其余取值才是这条值的类型码。把哨兵当类型码打印成"类型 0"会误导，
+/// 把三种读不懂压成一句更糟——那是在替一个没发生的状况编理由。
+///
+/// 越出文件末尾这一种，最想说出口的是"越到了哪个数"。一个哨兵位装不下它，
+/// 装下它要给 `TiffInplaceOpaque` 加字段（公开 API 与 `.mbti` 跟着动）。
+/// 这里先只把"是哪一种"说准，宁可少说一个数，不拿"值不是偏移表"这种
+/// 听着具体、其实没发生的句子顶岗。
+fn opaque_form(code : Int) -> String {
+  if code == 0 {
+    "its partner entry is missing"
+  } else if code == -1 {
+    "its partner entry lists a different number of values"
+  } else if code == -2 {
+    "the pixel range it declares runs past the end of the file"
+  } else {
+    "its value is TIFF type \{code}, not a list of byte offsets"
+  }
 }
 
 ///|

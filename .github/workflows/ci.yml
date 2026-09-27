@@ -106,6 +106,16 @@ jobs:
           moon run cmd/main -- strip /tmp/fix/cross_xmp.jpg
           moon run cmd/main -- redact /tmp/fix/xmp_only.jpg --policy strict
           moon run cmd/main -- strip /tmp/fix/xmp_only.jpg
+          # 裸 TIFF 那两份是 --keep-bytes 这一对的对照两端：cross.tiff 本来就没有
+          # 元数据，原位模式在这里只能"无事可做、原样交回"；bare_gps.tiff 带着
+          # 身份/时间/序列号/经纬度，strict 命中 7 条，才是真让引擎落笔的那一份。
+          # 没有后一份，CI 上那条原位路一次改写都没执行过。产物显式 -o 到语料之外，
+          # 免得下一关把它当多出来的一份语料扫。
+          mkdir -p /tmp/keepbytes
+          moon run cmd/main -- redact /tmp/fix/cross.tiff --keep-bytes --policy strict -o /tmp/keepbytes/cross.redacted.tif
+          moon run cmd/main -- strip /tmp/fix/cross.tiff --keep-bytes -o /tmp/keepbytes/cross.stripped.tif
+          moon run cmd/main -- redact /tmp/fix/bare_gps.tiff --keep-bytes --policy strict -o /tmp/keepbytes/bare_gps.redacted.tif
+          moon run cmd/main -- strip /tmp/fix/bare_gps.tiff --keep-bytes -o /tmp/keepbytes/bare_gps.stripped.tif
 
       - name: 用 Pillow 验收脱敏结果
         run: python ci/assert_redacted.py /tmp/fix
@@ -119,3 +129,20 @@ jobs:
 
       - name: 归因判据不许被悄悄改宽
         run: python ci/crosscheck_selftest.py
+
+      # 原位改写（--keep-bytes）那一腿的独立门禁：脚本自己走一遍 IFD 链、按
+      # TIFF 6.0 的宽度表预言该删哪几条、该碰哪些字节，再逐字节核引擎交出的
+      # 产物。外来语料（104 份陌生 TIFF）不在仓库里，CI 跑不了那一批；但这个
+      # 脚本的判据本身必须在 CI 上被执行一次——否则它就成了只有某台机器上
+      # 那句话算数、文档里写"有这道门禁"却没人跑的守卫。
+      # 两条腿各用各的输出目录：strict 与 strip 的产物同名（cross.inplace.tiff），
+      # 共用会互相盖掉；而且输出目录必须在语料目录之外，否则下一轮把上一轮的
+      # 产物当语料扫，分母就被自己的产物顶上去了。
+      - name: 原位对拍（strict 腿）
+        run: python ci/inplace_crosscheck.py /tmp/fix -o /tmp/inplace --policy strict
+
+      - name: 原位对拍（strip 腿）
+        run: python ci/inplace_crosscheck.py /tmp/fix -o /tmp/inplace-strip --strip
+
+      - name: 原位门禁自己有没有眼睛
+        run: python ci/inplace_crosscheck.py --selftest

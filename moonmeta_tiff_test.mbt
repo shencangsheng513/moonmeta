@@ -198,7 +198,9 @@ test "第四张表读得出来：条目进 interop，指针本身哪儿也不进
   @test.assert_eq(t.exif.length(), 0)
   @test.assert_eq(t.gps.length(), 0)
   @test.assert_eq(t.interop.length(), 2)
-  @test.assert_eq(t.interop[0].value, @moonmeta.Text("R98"))
+  // 结尾的 NUL 在值里：条目声明 4 字节，读出来就是 4 字节。
+  // 截断读法在这里看不出差别，但在"声明长度远大于文字本身"的文件上会吞字节。
+  @test.assert_eq(t.interop[0].value, @moonmeta.Text("R98\u0000"))
   @test.assert_eq(t.interop[1].value, @moonmeta.Longs([640L]))
   @test.assert_eq(t.has_ifd1, false)
 }
@@ -306,4 +308,52 @@ test "浮点类型码：本版本明确拒绝，而不是读出垃圾" {
   } noraise {
     _ => fail("expected a rejection")
   }
+}
+
+///|
+/// 外来语料的形状：Pillow 测试图 `invalid-exif-without-x-resolution.jpg` 的
+/// IFD0 首条把 `XResolution`（本应 RATIONAL）写成了 ASCII + count 10，
+/// 而负载第一个字节就是 NUL。"到 NUL 为止"的读法在这里读出一串空，
+/// 回写时条目从 10 字节缩成 1 字节，Pillow 接着拿 `x_resolution[1]`——
+/// 整个 JPEG 连"是不是 JPEG"都判不出来。
+fn mislabelled_ascii_fixture() -> Bytes {
+  let v : Array[Byte] = [
+    // 0: "II" + 42 + IFD0 @ 8
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+    // 8: IFD0 有 1 条
+     0x01, 0x00,
+    // 10: 0x011a XResolution, ASCII x10 -> 值在 26
+     0x1a, 0x01, 0x02, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+    // 22: 无后继
+     0x00, 0x00, 0x00, 0x00,
+    // 26: 声明的 10 个字节，第一个是 NUL
+     0x00, 0x04, 0x95, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  ]
+  Bytes::from_array(v)
+}
+
+///|
+test "ASCII 条目按声明长度收字节：10 字节读满，回写一模一样" {
+  let src = mislabelled_ascii_fixture()
+  let t = decode_ok(src)
+  @test.assert_eq(t.ifd0.length(), 1)
+  let e = t.ifd0[0]
+  @test.assert_eq(e.tag, 0x011a)
+  @test.assert_eq(e.type_code, 2)
+  match e.value {
+    @moonmeta.Text(s) => {
+      // 一个字节都没丢：长度由 count 决定，不由 NUL 的位置决定
+      @test.assert_eq(s.length(), 10)
+      @test.assert_eq(s.to_array()[0], '\u0000')
+    }
+    v => fail("expected Text, got \{v}")
+  }
+  // 显示层照旧在第一个 NUL 处收口：字节留在值里，读出来的文字不该带填充
+  @test.assert_eq(e.value.text(), Some(""))
+  @test.assert_eq(
+    @moonmeta.encode_tiff(t) catch {
+      err => fail("encode failed: \{err}")
+    },
+    src,
+  )
 }

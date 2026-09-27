@@ -490,14 +490,18 @@ fn read_bytes(
 
 ///|
 /// ISO-8859-1 逐字节映射：单字节 → 同名码点，无损且可逆。
-/// 在第一个 NUL 处截断（TIFF 的 ASCII 类型以 NUL 结尾）。
+///
+/// **不**在 NUL 处截断：`count` 说什么就读多少字节。真实的坏文件里这一类的
+/// 长度比看上去长——外来语料 `invalid-exif-without-x-resolution.jpg` 把
+/// `XResolution`（本来是 RATIONAL）标成了 ASCII + count 10，负载第一个字节
+/// 就是 NUL。截断读法得到空串，回写时只剩 1 字节，Pillow 随后拿
+/// `x_resolution[1]` 越界，整个 JPEG 连"是不是 JPEG"都判不出来。
+/// 结尾 NUL、填充 NUL 都是数据，读的时候丢不得；
+/// "这段文字到哪儿为止"是显示层的事（见 `TagValue::text`）。
 fn read_latin1(data : Bytes, voff : Int, count : Int) -> String raise MetaError {
   let chars : Array[Char] = []
   for i = 0; i < count; i = i + 1 {
     let b = byte_at(data, voff + i)
-    if b == b'\x00' {
-      break
-    }
     match b.to_int().to_char() {
       Some(c) => chars.push(c)
       // 0..255 必是合法码点；这一臂取不到，取到也只是丢一个字符，

@@ -74,6 +74,10 @@ pub let tag_thumb_length : Int
 
 pub let tag_thumb_offset : Int
 
+pub fn tiff_redact_inplace(Bytes, Policy) -> (Bytes, Redaction) raise MetaError
+
+pub fn tiff_strip_inplace(Bytes) -> (Bytes, Strip) raise MetaError
+
 pub fn type_decodable(Int) -> Bool
 
 pub fn type_size(Int) -> Int?
@@ -99,6 +103,9 @@ pub suberror MetaError {
   NotPng(Int)
   BadChecksum(Int, Int64, Int64)
   TiffNotByteExact(Int64, Int, Int)
+  TiffInplaceShared(Int, Int, Int, Int, String)
+  TiffInplaceCycle(Int)
+  TiffInplaceOpaque(Int, Int)
   UnknownFormat(Int)
 } derive(@debug.Debug)
 pub fn MetaError::output(Self, &Logger) -> Unit

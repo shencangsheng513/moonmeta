@@ -65,11 +65,33 @@ pub extend TagValue with @debug.Debug::{to_repr}
 pub extend TagValue with Show::{to_string, output}
 
 ///|
+/// 取文本值：到第一个 NUL 为止。
+///
+/// `Text` 里存的是**声明长度内的每一个字节**（含结尾与填充的 NUL），
+/// 那样回写才能一模一样；"这段文字读到哪儿算完"是显示层的问题，
+/// 就在这一层解决。要看原始字节直接用变体 `Text(s)`。
 pub fn TagValue::text(self : TagValue) -> String? {
   match self {
-    Text(s) => Some(s)
+    Text(s) => Some(trim_at_nul(s))
     _ => None
   }
+}
+
+///|
+fn trim_at_nul(s : String) -> String {
+  let chars = s.to_array()
+  let n = chars.length()
+  let out : Array[Char] = []
+  let mut i = 0
+  while i < n {
+    if chars[i] == '\u0000' {
+      i = n
+    } else {
+      out.push(chars[i])
+      i = i + 1
+    }
+  }
+  String::from_array(out)
 }
 
 ///|

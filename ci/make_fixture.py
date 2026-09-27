@@ -144,19 +144,45 @@ def insert_after_app0(data, payload):
     return data[:pos] + seg + data[pos:]
 
 
+def bare_exif():
+    """给裸 TIFF 用的一份真元数据：身份、时间、机身序列号、经纬度。
+
+    为什么不复用 `build_exif_block()`：那份是按规范手拼的 APP1 载荷，塞进
+    JPEG/PNG 容器正合适，而 Pillow 的 TIFF 写侧会重新序列化它（GPS 那一跳就
+    丢了，实测只剩 0 条）。这里走 Pillow 自己的 `Image.Exif`，让它把
+    Exif / GPS 两个子目录都真写出来——原位那条路要考的是"有东西可删"。
+    """
+    ex = Image.Exif()
+    ex[0x0110] = "NIKON D850"
+    ex[0x013B] = "Zhang San"
+    exd = ex.get_ifd(0x8769)
+    exd[0x9003] = "2026:09:24 15:51:00"
+    exd[0xA431] = "BODY-0001234567"
+    gpsd = ex.get_ifd(0x8825)
+    gpsd[0x0001] = "N"
+    gpsd[0x0002] = (31, 13.5, 0.0)
+    gpsd[0x0003] = "E"
+    gpsd[0x0004] = (121, 8.7, 0.0)
+    return ex
+
+
 def main():
-    """写五份 fixture：带/不带 EXIF、带/不带 XMP 的组合。
+    """写六份 fixture：带/不带 EXIF、带/不带 XMP 的组合。
 
     cross_xmp.jpg 与 xmp_only.jpg 是真实语料逼出来的两种形状——
     脱敏工具只看 IFD 条目的话，这两种文件的产物里会留着整套第二份元数据。
-    最后那份 TIFF 是"本来就没有"那条分支的对照：脱敏工具把"已清除"和
+    cross.tiff 是"本来就没有"那条分支的对照：脱敏工具把"已清除"和
     "无需清除"混为一谈，用户就再没有信任它的理由了。
+    bare_gps.tiff 是它的反面，也是这一批里唯一"有元数据的裸 TIFF"：没有它，
+    `--keep-bytes` 那条原位路在 CI 上只会走到"无事可做，原样交回"那一格，
+    引擎真正的原位改写一次都没被执行过。
     """
     block = build_exif_block()
     img = Image.new("RGB", (24, 16), (200, 40, 40))
     img.save(OUT / "cross.jpg", "JPEG", exif=b"Exif\x00\x00" + block)
     img.save(OUT / "cross.png", "PNG", exif=block)
     img.save(OUT / "cross.tiff", "TIFF")
+    img.save(OUT / "bare_gps.tiff", "TIFF", exif=bare_exif().tobytes())
     (OUT / "exif_block.bin").write_bytes(block)
 
     plain = OUT / "_plain.jpg"
@@ -172,6 +198,7 @@ def main():
         OUT / "cross.jpg",
         OUT / "cross.png",
         OUT / "cross.tiff",
+        OUT / "bare_gps.tiff",
         OUT / "xmp_only.jpg",
         OUT / "cross_xmp.jpg",
     )

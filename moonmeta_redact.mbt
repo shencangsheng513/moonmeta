@@ -113,6 +113,13 @@ pub extend Removed with @debug.Debug::{to_repr}
 /// `dropped_thumbnail` 为真表示原文件的 APP1 里挂着缩略图链，
 /// 回写时它被整条丢掉——缩略图常常自带一份 GPS，
 /// "删了主 GPS 却留着缩略图"是最常见的假脱敏。
+///
+/// 缩略图消失还有第二条路，都得算进同一个旗标：IFD0 里单挂着
+/// `0x0201`/`0x0202` 这一对指针、却没有 IFD1 链的文件（语料
+/// `exif_gps.jpg` 就是这样，而且它声明的长度是 `0xffffffff`）。
+/// 回写时这两个条目一定没了——它们指的字节不会被重发，留着就是悬空引用。
+/// 少了这一半，报告上就看不出"顺手没了两条"，而这正是脱敏工具最不该有
+/// 的那种沉默。
 pub(all) struct Redaction {
   removed : Array[Removed]
   dropped_thumbnail : Bool
@@ -181,9 +188,23 @@ pub fn TiffBlock::redact(
   }
   // 裸 TIFF 里 XMP 是 IFD0 的一条（0x02bc），已经被上面的按条过滤处理了；
   // 这里的 dropped_xmp 只说容器里那种成包的 XMP。
+  //
+  // 缩略图有两条消失的路，都要算进 dropped_thumbnail：
+  // 一条是 IFD1 链（回写时整条不重发），另一条是 IFD0 里的
+  // 0x0201/0x0202 这一对指针（moonmeta_encode.mbt 的 entries_of 一定把它们
+  // 摘掉——它们指的字节不会被重发，留着就是悬空引用）。
+  // 第二条只在**真的重写**时成立：一条都没删时容器层原样返回输入，
+  // 什么也没丢，这时候报"丢了缩略图"就是谎话，而且会逼着那次
+  // 本不该发生的重写发生（空策略必须是恒等）。
+  let thumb_ptrs = find_entry(self.ifd0, tag_thumb_offset) != None ||
+    find_entry(self.ifd0, tag_thumb_length) != None
   (
     block,
-    { removed: report, dropped_thumbnail: self.has_ifd1, dropped_xmp: false, },
+    {
+      removed: report,
+      dropped_thumbnail: self.has_ifd1 || (thumb_ptrs && !report.is_empty()),
+      dropped_xmp: false,
+    },
   )
 }
 
