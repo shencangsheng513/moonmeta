@@ -67,8 +67,9 @@ fn ifd0_name(tag : Int) -> String? {
     0x02bc => Some("XMP")
     0x02bd => Some("PhotoshopSettings")
     0x8298 => Some("Copyright")
+    0x83bb => Some("IptcNaa")
     0x8769 => Some("ExifOffset")
-    0x8773 => Some("IptcNaa")
+    0x8773 => Some("InterColorProfile")
     0x8825 => Some("GPSInfo")
     _ => None
   }
@@ -172,7 +173,10 @@ let sensitive_tags : Array[(Dir, Int, Sensitive)] = [
   // 里面的字段归 XMP / Photoshop / IPTC 各自的规范管，我们逐条判断不了。
   (Ifd0, 0x02bc, Carrier),
   (Ifd0, 0x02bd, Carrier),
-  (Ifd0, 0x8773, Carrier),
+  (Ifd0, 0x83bb, Carrier),
+  // `0x8773` (InterColorProfile) 刻意不在任何类别里：ICC 是一份色彩变换表，
+  // 不是元数据的第二副本，里面既指不出人也指不出地点。把它当载体摘掉，
+  // 换来的不是隐私而是产物偏色——摘别人的颜色不是脱敏工具的权利。
   // 用户写的话
   (Exif, 0x9286, Comments),
   // 能把照片排进时间线的一切
@@ -208,8 +212,10 @@ pub(all) enum Sensitive {
   ///
   /// 前六类说的是"这一条是什么"，这一类说的是"这里还有一整套元数据"：
   /// 载体里的字段编号、命名、编码都归另一份规范管，按条判断力所不及，
-  /// 只能整包丢。99 张真实照片里，IFD0 带 XMP 载体的 1 张、带 IPTC-NAA 的 4 张，
-  /// 而 JPEG/PNG 里的 XMP 包有 34 张——所以这一类不是理论负担。
+  /// 只能整包丢。所以这一类不是理论负担——三批外来 TIFF（104 份，IFD0
+  /// 全部走通）里带 XMP 载体的 10 份、带 IPTC-NAA（`0x83bb`）的 1 份、
+  /// 带 Photoshop 载体的 0 份；JPEG 那一侧的 IPTC 不住在 IFD0 里，
+  /// 走 APP13 段，由容器层整段摘（见 `moonmeta_jpeg.mbt`）。
   Carrier
 } derive(Debug, Eq)
 

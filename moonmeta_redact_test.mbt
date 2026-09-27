@@ -159,7 +159,7 @@ test "七个类别各自点名，不互相串" {
     Some(@moonmeta.Location),
   )
   // 整包载体：XMP / Photoshop / IPTC-NAA 三个编号都在 IFD0 下
-  for tag in [0x02bc, 0x02bd, 0x8773] {
+  for tag in [0x02bc, 0x02bd, 0x83bb] {
     @test.assert_eq(
       @moonmeta.sensitive_category(d, tag),
       Some(@moonmeta.Carrier),
@@ -262,6 +262,51 @@ test "整包载体在清单里点名，删完字节里查不到" {
   // 权利声明与机型不受牵连
   @test.assert_eq(t.copyright(), Some("(C) 2026 Someone"))
   @test.assert_eq(t.make(), Some("NIK"))
+}
+
+///|
+/// 裸 TIFF 里的 IPTC-NAA（`0x83bb`）与 ICC 色彩配置文件（`0x8773`）是两回事。
+///
+/// 这一对断言是给一次真实的错位留的：这两个编号一度被写成同一个，于是两头
+/// 同时错——真 IPTC 一条都不报（假脱敏），而别人的色彩配置文件被当成
+/// "这里还有一整套元数据"整包删掉（产物偏色）。只查"删没删"的测试看不出
+/// 第二种错，所以这里必须一删一留同时钉住。
+test "TIFF 里的 IPTC 要摘掉，ICC 要原样留下" {
+  let iptc : @moonmeta.IfdEntry = {
+    tag: 0x83bb,
+    type_code: 7,
+    value: @moonmeta.Raw(ascii("\x1c\x02\x00Iptc2.0.0")),
+  }
+  let icc : @moonmeta.IfdEntry = {
+    tag: 0x8773,
+    type_code: 7,
+    value: @moonmeta.Raw(ascii(" ICC_PROFILE_MARKER")),
+  }
+  let block : @moonmeta.TiffBlock = {
+    little: true,
+    ifd0: [ascii_entry(0x0110, "D850"), iptc, icc],
+    exif: [],
+    gps: [],
+    interop: [],
+    has_ifd1: false,
+  }
+  let src = @moonmeta.encode_tiff(block) catch {
+    e => fail("iptc/icc fixture must encode: \{e}")
+  }
+  // 审计：只有 IPTC 露头，ICC 不在任何类别里
+  @test.assert_eq(listing(decode_ok(src).findings(@moonmeta.strict_policy())), [
+    "IFD0/IptcNaa(carrier)",
+  ])
+  let (out, report) = @moonmeta.redact_tiff(src, @moonmeta.strict_policy()) catch {
+    e => fail("redact failed: \{e}")
+  }
+  @test.assert_eq(listing(report.removed), ["IFD0/IptcNaa(carrier)"])
+  let t = decode_ok(out)
+  @test.assert_eq(t.ifd0_find(0x83bb), None)
+  @test.assert_eq(contains_bytes(out, ascii("Iptc2.0.0")), false)
+  // ICC 那一条既要条目还在、也要字节还在：只查条目会放过"条目在、值被搬空"
+  @test.assert_eq(t.ifd0_find(0x8773).is_some(), true)
+  @test.assert_eq(contains_bytes(out, ascii(" ICC_PROFILE_MARKER")), true)
 }
 
 ///|

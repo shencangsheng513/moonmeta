@@ -10,7 +10,7 @@ fn check(dir : @moonmeta.Dir, id : Int, want : String) -> Unit raise {
 }
 
 ///|
-/// 本包有规范名的全部编号：IFD0 14 个、Exif 14 个、GPS 32 个、Interop 4 个。
+/// 本包有规范名的全部编号：IFD0 15 个、Exif 14 个、GPS 32 个、Interop 4 个。
 test "规范名表：README 报出的编号与名字逐条对得上" {
   let ifd0 : Array[(Int, String)] = [
     (0x010f, "Make"),
@@ -23,7 +23,8 @@ test "规范名表：README 报出的编号与名字逐条对得上" {
     (0x0202, "JPEGInterchangeFormatLength"),
     (0x02bc, "XMP"),
     (0x02bd, "PhotoshopSettings"),
-    (0x8773, "IptcNaa"),
+    (0x83bb, "IptcNaa"),
+    (0x8773, "InterColorProfile"),
     (0x8298, "Copyright"),
     (0x8769, "ExifOffset"),
     (0x8825, "GPSInfo"),
@@ -103,7 +104,7 @@ test "规范名表：README 报出的编号与名字逐条对得上" {
   @test.assert_eq(
     ifd0.length() + exif.length() + gps.length() + interop.length(),
     // 上面四张期望清单的条目总数；新增要点名的 tag 时同步加。
-    64,
+    65,
   )
 }
 
@@ -142,4 +143,13 @@ test "策略够不着的条目要说清是哪一类，或明确不属于" {
     @moonmeta.sensitive_category(@moonmeta.Gps, 0x0000),
     Some(@moonmeta.Location),
   )
+  // TIFF 里的整包 IPTC-NAA 是 0x83bb。它一度被记成 0x8773，于是真 IPTC
+  // 一条都不报、而别人的 ICC 配置文件被当成元数据摘掉——两头都错。
+  @test.assert_eq(
+    @moonmeta.sensitive_category(@moonmeta.Ifd0, 0x83bb),
+    Some(@moonmeta.Carrier),
+  )
+  // 0x8773 是 ICC 色彩变换表：不是谁的行踪，摘了只会让产物偏色。
+  // 这一条断言是那一格的反向闸——它要是变成 Some(_)，脱敏就在改颜色了。
+  @test.assert_eq(@moonmeta.sensitive_category(@moonmeta.Ifd0, 0x8773), None)
 }

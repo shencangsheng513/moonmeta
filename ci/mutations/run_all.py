@@ -81,6 +81,13 @@ SPECS = {
                 r"^还原对账：.*-> 不一致$"],
         rc_is_verdict=True,
     ),
+    "mut_d15.py": dict(
+        green_re=[r"^期望表态 (\d+) 处，抓到 (\d+) 处$",
+                  r"^开跑前锚点清点：(\d+)/(\d+) "],
+        red_re=[r"^MISSED ", r"^!!!   ", r"^ABORT ", r"^  !! ",
+                r"^还原\*\*失败\*\*"],
+        rc_is_verdict=True,
+    ),
 }
 DRIVERS = list(SPECS)
 
@@ -96,6 +103,7 @@ NEEDS_CORPUS = {
     "mut_d12.py": False,       # 驱动是 crosscheck_selftest
     "mut_d13.py": False,       # 驱动是 replay_cli --check-only
     "mut_d9e.py": False,       # 驱动是 crosscheck_selftest
+    "mut_d15.py": False,       # 驱动是 moon test，夹具（IPTC/ICC 那一对）在库内
 }
 
 # 两组"必须自己相等"的计数：注入的格数 vs 抓到红的格数；锚点在位数 vs 锚点总数。
@@ -114,6 +122,7 @@ RED_LINES = {
     "mut_d12.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
     "mut_d13.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
     "mut_d9e.py": "MISSED Z9：rc=0，要求红在「x」上\n",
+    "mut_d15.py": "MISSED 没红在「一条不存在的用例名」（实际红=[]）\n",
 }
 
 
@@ -288,6 +297,9 @@ TRUTH_TABLE = [
                    "期望表态 16 处，抓到 15 处\n没抓到：N7 不再拦同一份字节报两遍\n"
                    "还原对账：sha 9adf15e4f410 vs 基线 9adf15e4f410 -> 一致", 0, False),
     ("mut_d9e.py", "开跑前锚点清点：16/16 恰好在位一次\n基线不绿，先修闸再谈变异。", 1, False),
+    ("mut_d15.py", "开跑前锚点清点：3/3 唯一在位\n期望表态 7 处，抓到 7 处", 0, True),
+    ("mut_d15.py", "开跑前锚点清点：3/3 唯一在位\n期望表态 7 处，抓到 6 处", 0, False),
+    ("mut_d15.py", "开跑前锚点清点：2/3 唯一在位\nMISSED 锚点漂了，先停下。", 1, False),
 ]
 
 
@@ -320,8 +332,19 @@ def cmd_selftest():
     print("{}  语料名单双向差集为空（SPECS {} 个 / 声明 {} 个）{}".format(
         "ok  " if census_ok else "FAIL", len(SPECS), len(NEEDS_CORPUS),
         "" if census_ok else "　缺声明：" + "、".join(untagged + orphan)))
+    covered = {n for n, _b, _rc, g in TRUTH_TABLE if g}
+    no_row = [n for n in DRIVERS if n not in covered]
+    no_red = [n for n in DRIVERS if n not in RED_LINES]
+    row_ok = not no_row and not no_red
+    fails += not row_ok
+    miss = "".join([
+        "　缺正例：" + "、".join(no_row) if no_row else "",
+        "　缺红句：" + "、".join(no_red) if no_red else "",
+    ])
+    print("{}  每个 SPECS 驱动都有一格真日志正例与一句红句（{} 个驱动）{}".format(
+        "ok  " if row_ok else "FAIL", len(DRIVERS), miss))
     print("\n判定器真值表：{} 格，错 {} 格".format(
-        len(TRUTH_TABLE) + len(RED_LINES) + 1, fails))
+        len(TRUTH_TABLE) + len(RED_LINES) + 2, fails))
     return 0 if fails == 0 else 1
 
 
