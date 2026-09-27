@@ -22,14 +22,15 @@ GATE = REPO / "ci" / "crosscheck_real.py"
 
 JPEG_ARM = """    Some(Jpeg) => {
       let (no_exif, had) = jpeg_remove_exif(data)
-      let (out, dropped) = jpeg_drop_xmp(no_exif)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      let (no_xmp, dropped) = jpeg_drop_xmp(no_exif)
+      let (out, dropped_iptc) = jpeg_drop_iptc(no_xmp)
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc, })
     }
 """
 PNG_ARM = """    Some(Png) => {
       let (no_exif, had) = png_remove_exif(data)
       let (out, dropped) = png_drop_xmp(no_exif)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc: false, })
     }
 """
 
@@ -40,8 +41,9 @@ MUTS = [
         "old": JPEG_ARM,
         "new": """    Some(Jpeg) => {
       let (no_exif, had) = jpeg_remove_exif(data)
-      let (out, dropped) = (no_exif, false)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      let (no_xmp, dropped) = (no_exif, false)
+      let (out, dropped_iptc) = jpeg_drop_iptc(no_xmp)
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc, })
     }
 """,
         "corpus": JPG,
@@ -59,7 +61,7 @@ MUTS = [
         "new": """    Some(Png) => {
       let (no_exif, had) = png_remove_exif(data)
       let (out, dropped) = (no_exif, false)
-      (out, { had_exif: had, dropped_xmp: dropped, })
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc: false, })
     }
 """,
         "corpus": PNG,
@@ -72,8 +74,9 @@ MUTS = [
         "old": JPEG_ARM,
         "new": """    Some(Jpeg) => {
       let (no_exif, _had) = jpeg_remove_exif(data)
-      let (out, _dropped) = jpeg_drop_xmp(no_exif)
-      (out, { had_exif: false, dropped_xmp: false, })
+      let (no_xmp, _dropped) = jpeg_drop_xmp(no_exif)
+      let (out, _iptc) = jpeg_drop_iptc(no_xmp)
+      (out, { had_exif: false, dropped_xmp: false, dropped_iptc: false, })
     }
 """,
         "corpus": JPG,
@@ -103,6 +106,48 @@ MUTS = [
         "limit": 3,
         "expect": ["strip 这一关一个文件都没跑到"],
     },
+    {
+        # 这两格打的是 D9-E 新加的那一位。带 APP13 的文件在 `jpg/` 里按字典序
+        # 排在第 11~89 位，前四个文件根本走不到这一支——所以它们不靠加大 limit，
+        # 而是用 --only 点到一处既有 EXIF 又带 IPTC 包的真照片上。
+        "name": "M6 jpeg strip 跳过 IPTC 包（产物里留第二份隐私副本）",
+        "file": CONTAINER,
+        "old": JPEG_ARM,
+        "new": """    Some(Jpeg) => {
+      let (no_exif, had) = jpeg_remove_exif(data)
+      let (out, dropped) = jpeg_drop_xmp(no_exif)
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc: false, })
+    }
+""",
+        "corpus": JPG,
+        "limit": 4,
+        "only": "landscape_1",
+        "expect": [
+            "strip 之后 read 还报得出 IPTC 包",
+            "strip 之后产物里还有 IPTC/Photoshop 包",
+        ],
+    },
+    {
+        "name": "M7 IPTC 摘干净了却不交代（只有句与事实的判据抓得到）",
+        "file": CONTAINER,
+        "old": JPEG_ARM,
+        "new": """    Some(Jpeg) => {
+      let (no_exif, had) = jpeg_remove_exif(data)
+      let (no_xmp, dropped) = jpeg_drop_xmp(no_exif)
+      let (out, _iptc) = jpeg_drop_iptc(no_xmp)
+      (out, { had_exif: had, dropped_xmp: dropped, dropped_iptc: false, })
+    }
+""",
+        "corpus": JPG,
+        "limit": 4,
+        "only": "landscape_1",
+        "expect": ["源文件带着 IPTC/Photoshop 包，strip 却没有交代摘除它"],
+        # 和 M3 同一条道理：产物是干净的，红只能红在那句话上
+        "absent": [
+            "strip 之后产物里还有 IPTC/Photoshop 包",
+            "strip 之后 read 还报得出 IPTC 包",
+        ],
+    },
 ]
 
 
@@ -124,21 +169,24 @@ def as_bytes(s, nl):
     return s.replace("\n", nl).encode("utf-8")
 
 
-def run(corpus, limit, out_dir):
+def run(corpus, limit, out_dir, only=None):
     env = dict(os.environ)
     env["PATH"] = env["PATH"] + ";D:\\moonbit\\bin"
     env["PYTHONIOENCODING"] = "utf-8"
+    argv = [
+        sys.executable,
+        "-u",
+        "ci/crosscheck_real.py",
+        str(corpus),
+        "-o",
+        str(out_dir),
+        "--limit",
+        str(limit),
+    ]
+    if only:
+        argv += ["--only", only]
     proc = subprocess.run(
-        [
-            sys.executable,
-            "-u",
-            "ci/crosscheck_real.py",
-            str(corpus),
-            "-o",
-            str(out_dir),
-            "--limit",
-            str(limit),
-        ],
+        argv,
         cwd=str(REPO),
         capture_output=True,
         env=env,
@@ -155,9 +203,11 @@ def triage_count(text):
 
 
 problems = []
+caught = 0
 DUMP = REPO / ".scratch" / "d7mut_out"
 DUMP.mkdir(exist_ok=True)
 for i, m in enumerate(MUTS):
+    before = len(problems)
     path = m["file"]
     raw = path.read_bytes()
     nl = "\r\n" if b"\r\n" in raw else "\n"
@@ -173,7 +223,9 @@ for i, m in enumerate(MUTS):
         problems.append(m["name"] + "：变异没落盘")
         continue
     try:
-        rc, text, err = run(m["corpus"], m["limit"], REPO / ".scratch" / "d7mut")
+        rc, text, err = run(
+            m["corpus"], m["limit"], REPO / ".scratch" / "d7mut", m.get("only")
+        )
     finally:
         path.write_bytes(raw)
         restored = sha(path) == sha_bytes(raw)
@@ -205,6 +257,8 @@ for i, m in enumerate(MUTS):
             problems.append("{}：不该红的也红了（{}）".format(m["name"], e))
             print("   多抓 {}".format(e))
     print()
+    if len(problems) == before:
+        caught += 1
 
 rc, text, _err = run(JPG, 4, REPO / ".scratch" / "d7green")
 print("== 全部还原后的复跑：rc={}，分诊 {} 个".format(rc, triage_count(text)))
@@ -212,9 +266,14 @@ if rc != 0:
     problems.append("还原后复跑不绿")
 
 print()
+print("期望表态 {} 处，抓到 {} 处".format(len(MUTS), caught))
 if problems:
     print("变异驱动没过关：")
     for p in problems:
         print("  - " + p)
     sys.exit(1)
-print("五处坏各处红一次，句与事实的判据不靠字节也抓得到，地板出声；还原后复跑真绿。")
+print(
+    "{} 处坏各处红一次，句与事实的判据不靠字节也抓得到，地板出声；还原后复跑真绿。".format(
+        caught
+    )
+)
