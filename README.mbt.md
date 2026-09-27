@@ -401,6 +401,23 @@ moon test --target wasm-gc
   话，后面那半天的比对一文不值），脱敏之后 `ci/assert_redacted.py` 再用
   Pillow 复查：点名的条目读不到了、未点名的还在、输入文件逐字节没动、
   像素与原图完全一致。
+- **四批外来语料的来路**（都是别人的仓库，克隆 + 一条采集命令即可复算；下面两条
+  `git ls-remote` 今天各自实跑过，都拿得到 `refs/heads`）。
+  `git clone --depth 1 https://github.com/ianare/exif-samples.git` 出第一批；
+  `git clone --depth 1 https://github.com/python-pillow/Pillow.git` 出第二、三、
+  四批，用 `python -u ci/grab_corpus.py <克隆目录> --batch tiff|jpeg|png --out <目录>`
+  挑——规则住在代码里（都只看 `Tests/images` 根下那一层，再按容器魔数和"字节里到底
+  有没有元数据标记"筛），没挑上的按原因计数打印而不是静默丢。今天从真克隆跑出来是
+  TIFF 106 候选留 104（被筛掉的那两个都以 `II+` 开头，是 BigTIFF）、JPEG 55 全留、
+  PNG 319 候选留 5，与跑对拍用的那三份目录逐字节相同（sha256 逐个比过）。
+  扫描器按 `IMAGE_SUFFIXES` 过滤后缀，所以 exif-samples 那一批进分母的是 `jpg/`
+  与 `tiff/` 下的 91 张 JPEG + 8 张裸 TIFF = 99，`heic/` 那 6 个后缀不在表里、
+  不进分母（今天从真克隆数一遍 IMAGE_SUFFIXES 命中的也是 99，文件名集合与本机那份
+  完全一致）。拿到目录就跑
+  `python -u ci/crosscheck_real.py <语料目录> -o <产物目录> --moon <moon 路径>`；
+  原位那条腿单独跑
+  `python -u ci/inplace_crosscheck.py <TIFF 目录> --strip -o <产物目录> --moon <moon 路径>`。
+  两条门禁的产物目录都要在语料目录之外、且各用各的（strict 与 strip 的产物同名）。
 - **真实照片语料对拍。** 上面那些 fixture 是自己造的，尺子也在自己手里，所以另有
   `ci/crosscheck_real.py`：拿 99 张不为这个库造的照片（`ianare/exif-samples`：
   91 张 JPEG + 8 张裸 TIFF）一张一张和 Pillow 对——逐条编号两个方向都要一致，
