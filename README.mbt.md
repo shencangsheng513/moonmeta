@@ -253,8 +253,10 @@ fn audit_and_clean(data : Bytes) -> Bytes raise {
 }
 ```
 
-上面这段是可执行文档：它逐字住在 `moonmeta_readme_test.mbt` 里当测试跑，
-接口一改构建就红。它对着 `moonmeta_tiff_test.mbt` 里那份手算 fixture
+上面这段是可执行文档：它的函数体住在 `moonmeta_readme_test.mbt` 里当测试跑，那份只比这里多
+一句断言——把 `_report` 接成 `report`，再钉一行 `@test.assert_eq(report.removed.length(), findings.length())`，
+也就是"报告说删了几条，产物里就得真少几条"。接口一改构建就红，把流程改坏也红。
+它对着 `moonmeta_tiff_test.mbt` 里那份手算 fixture
 （同一份元数据分别装进 JPEG、PNG、裸 TIFF）各打出这 5 行：
 
 ```console

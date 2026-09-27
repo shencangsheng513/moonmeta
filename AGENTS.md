@@ -86,8 +86,14 @@ You can browse and install extra skills here:
 
 ### 文档是被测试钉住的
 
-- README 里那段库用法示例逐字住在 `moonmeta_readme_test.mbt`（那个文件第一行就这么写着）。
-  改 README 的示例代码必须同步改它，否则 `moon test` 红。
+- README 里那段库用法示例的函数体住在 `moonmeta_readme_test.mbt` 里当测试跑（那个文件第一行
+  就这么写着），那份只比 README 多一句 `@test.assert_eq(report.removed.length(), findings.length())`。
+  改示例代码必须同步改它，否则 `moon test` 红。
+- README 里那些 ```console 块（今天实测 20 段，命令与真输出都在里面）大体**没有**逐字断言的测试，
+  靠人工与屏幕比对 + `ci/replay_cli.py`
+  复放 CI 里同一批命令（它验命令与退码，不验那几行文字）。例外是 CLI 那几句整句文案——
+  `cmd/main/main_wbtest.mbt` 把它们逐字钉住了（例如测试里那句 `contains("两条路都清不到链里这一份")`
+  与"另含 XMP 包：read 不摊开它，逐条清单里也永远不会出现它。"），改这几句要先红在测试里。
 - README 的 64 个 tag 规范名逐条断言在 `moonmeta_tags_test.mbt` 里。
 - README 里 ```console 那些真实输出对着 `python ci/make_fixture.py` 造的六份文件
   （默认落 `.scratch/fix/`，CI 落 `/tmp/fix`）。换 fixture 名字或路径 ⇒ 示例要重跑、
