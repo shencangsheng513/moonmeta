@@ -28,6 +28,18 @@ SKIP_PREFIX = ("curl ", "echo ", "pip install", "moon version", "moon fmt",
                "moon info", "git diff")
 
 
+def safe(text):
+    """要打字的先发过一道编码器。
+
+    被重定向的 stdout 在 Windows 上按 cp936 走，而下面捕获子进程输出用的是
+    utf-8 + errors="replace"——那里面只要有一个替换字符（U+FFFD 不在 cp936 的
+    字符集里），`print` 就当场抛异常，前面那张逐条表整批作废。真实教训是本机
+    复放 `moon update` 撞网络失败那趟：崩在打印那一行，"非 0 的几条"根本没打出来。
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return text.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
 def cli_job_lines(workflow):
     """取 `cli` 作业里的 (步骤名, 命令行列表)，按 ci.yml 原顺序。"""
     steps = []
@@ -188,9 +200,9 @@ def main():
                                   encoding="utf-8", errors="replace")
             out = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
             mark = "OK  " if proc.returncode == 0 else "FAIL"
-            print("      [{}] rc={} {}".format(mark, proc.returncode, line[:120]))
+            print(safe("      [{}] rc={} {}".format(mark, proc.returncode, line[:120])))
             for tail in out[-2:]:
-                print("        | " + tail[:200])
+                print(safe("        | " + tail[:200]))
             if proc.returncode != 0:
                 step_rc = step_rc or proc.returncode
                 bad.append((name, line, proc.returncode))

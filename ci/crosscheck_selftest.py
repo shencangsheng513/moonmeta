@@ -37,6 +37,7 @@
     python ci/crosscheck_selftest.py -v
 """
 
+import io
 import shutil
 import sys
 import tempfile
@@ -76,6 +77,7 @@ from crosscheck_real import (  # noqa: E402
     xmp_injected,
     zero_length_entries,
 )
+from replay_cli import safe  # noqa: E402
 
 URI = b"http://ns.adobe.com/xap/1.0/"  # JPEG APP1/XMP 的包标记
 # 这两份常量刻意写死字面量，不写 XMP_MARKS[i]：那是一份会长的名单，
@@ -1389,6 +1391,34 @@ class FallbackNote(unittest.TestCase):
         for err in (None, ""):
             note = no_shape_note(err)
             self.assertTrue(note.startswith("读侧失败"))
+
+
+class PrintEncoding(unittest.TestCase):
+    # 复放器要把每条命令的输出尾巴打到屏幕上。子进程那侧是按 utf-8 +
+    # errors="replace" 捕获的，里面可能出现 U+FFFD；而 Windows 上被重定向的
+    # stdout 走 cp936，那个字符不在它的字符集里——直接 print 就崩在打印这一行，
+    # 前面那张逐条表连着"非 0 的几条"一起作废（本机复放 `moon update` 撞网络
+    # 失败那一趟真就是这么死的）。safe() 是唯一挡在中间的，这一格钉它。
+    def test_不可编码字符要变成问号而不是崩(self):
+        buf = io.BytesIO()
+        real = sys.stdout
+        wrapper = io.TextIOWrapper(buf, encoding="cp936", errors="strict",
+                                   newline="\n")
+        try:
+            sys.stdout = wrapper
+            print(safe("尾巴里有 \ufffd 的那一行"))
+        finally:
+            sys.stdout = real
+        # 必须 detach：直接让那个包装被回收会把底下的 BytesIO 一起关掉，
+        # 这一格就会以"I/O operation on closed file"失败，看上去像 safe() 坏了。
+        wrapper.flush()
+        wrapper.detach()
+        written = buf.getvalue().decode("cp936")
+        self.assertIn("尾巴里有", written)
+        self.assertIn("?", written)
+
+    def test_能编码的字一个都不动(self):
+        self.assertEqual(safe("清单对账：14 个步骤"), "清单对账：14 个步骤")
 
 
 if __name__ == "__main__":

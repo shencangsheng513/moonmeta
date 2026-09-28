@@ -107,7 +107,7 @@ You can browse and install extra skills here:
 
 | 命令 | 判据 |
 | --- | --- |
-| `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran N tests` / `OK`；N 以当回合输出为准，最近一次实测 141） |
+| `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran N tests` / `OK`；N 以当回合输出为准，2026-09-28 最近一次实测 143） |
 | `python ci/inplace_crosscheck.py --selftest` | 原位门禁自己有没有眼睛（逐格 OK + 收尾"inplace_crosscheck 自测真值表：N 格，错 0 格"，名单被删短会红在 N 上；地板 14） |
 | `python ci/mutations/run_all.py --selftest` | 变异判定器真值表（收尾"判定器真值表：N 格，错 0 格"） |
 | `python ci/registry_census.py --selftest` | 查重计数器的真值表（11 格：计数两层、形状闸、分母闸；不打网） |
