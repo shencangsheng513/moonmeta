@@ -105,13 +105,20 @@ def moon_test():
 
 
 def gate_selftest():
-    """门禁自测。红了不够，还要看红的是哪一格：拿 FAIL 行对账。"""
+    """门禁自测。红了不够，还要看红的是哪一格：拿 FAIL 行对账。
+
+    收尾那句 2026-09-28 从 `自测：通过/失败` 换成了 `自测真值表：N 格，错 M 格`
+    （N 由代码当场数、地板写死），这里跟着换：判红只认顶格那句里的 M，
+    外加退出码一票——名单被删短那一格 M=0、rc=1，只看 M 会漏。
+    """
     code, out = run([sys.executable, str(GATE), "--selftest"])
-    ran = "自测：" in out
-    verdict = bool(re.search(r"自测：失败", out))
+    m = re.search(r"自测真值表：(\d+) 格，错 (\d+) 格", out)
+    ran = m is not None
+    cells = int(m.group(1)) if ran else 0
+    reds = (int(m.group(2)) + (1 if code != 0 else 0)) if ran else 0
     fails = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("FAIL")]
-    print("  门禁自测: rc={} 跑到={} 判定={} FAIL 格数={}".format(
-        code, ran, "红" if verdict else ("绿" if ran else "没跑到"), len(fails)))
+    print("  门禁自测: rc={} 跑到={} 判定={} 格数={} 坏数={} FAIL 行={}".format(
+        code, ran, "红" if reds else ("绿" if ran else "没跑到"), cells, reds, len(fails)))
     for ln in fails[:3]:
         print("     | " + ln)
     # 前提闸与对账类问题不打 FAIL 行，是"  - "清单里的条目：看不见它们就等于
@@ -120,7 +127,7 @@ def gate_selftest():
         ln.strip() for ln in out.splitlines() if ln.strip().startswith("- ")
     ][:3]:
         print("     ! " + ln)
-    return code, (1 if verdict else 0), ran
+    return code, reds, ran
 
 
 def corpus_leg():
