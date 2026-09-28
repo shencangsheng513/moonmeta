@@ -920,16 +920,25 @@ def refuse_empty_scan(files, corpus, only=None):
 def selftest():
     """反向闸：脚本自己有没有眼睛。这一格不跑 CLI，也不需要语料。
 
-    两条来路闸（合法产物本身、区间内再动一格必须绿）+ 五条反向闸（区间外、
-    TIFF 头、像素、该清零却没清零、目录链形状）。只验红的闸会把"逢产物必红"
-    这种坏法一起放行，所以先来路后反向。后两条还有一层共同点：改动全落在
-    施工区间内，覆盖闸看不见它们，只有各自那一闸看得见——这正是它们存在的理由。
+    名单 14 格，按实跑的 14 行 OK 分四簇：
 
-    最后一簇是分母闸（语料目录不存在、产物目录嵌在语料里/就是语料、扫到 0 份）：
-    它和 `main()` 用的是同一个函数，所以钉的是真会走的那条路，而不是一个
-    只有测试在调的副本；每一格都有配对的放行格，恒拒绝的实现同样要红。
+    - 2 格恒绿对照（独立实现的合法产物本身、区间内再动一格必须绿）；
+    - 6 格反向注入（区间外、TIFF 头、像素声明、该清零却没清零、目录链形状、
+      长度少一格）。只验红的闸会把"逢产物必红"这种坏法一起放行，所以先来路
+      后反向。中间两条还有一层共同点：改动全落在施工区间内，覆盖闸看不见它们，
+      只有各自那一闸看得见——这正是它们存在的理由。
+    - 4 格产物目录布局闸（嵌在语料里、就是语料、语料目录不存在、与语料同级）；
+    - 2 格扫描分母闸（扫到 0 份、扫到 1 份）。
+
+    后两簇和 `main()` 用的是同一个函数，所以钉的是真会走的那条路，而不是一个
+    只有测试在调的副本；每一簇里拒绝与放行都有配对格，恒拒绝与恒放行的实现
+    同样要红。
     """
     problems = []
+    # 格子计数：名单被删短一格时，"自测：通过"这句话本身没有区分度——剩下
+    # 的十三格照样全绿。所以这里数一遍，并在收尾和地板对账。
+    cell_count = [0]
+    bad_cells = [0]
     blob = bytes(mini_tiff())
     tif = TIFF(blob)
     pl = plan(tif, {("IFD0", 315)}, False)
@@ -949,6 +958,7 @@ def selftest():
         )
 
     def check(what, mutated, expect_red, because=None):
+        cell_count[0] += 1
         got = verify_product(tif, blob, mutated, disclosed, scrub)
         red = bool(got)
         ok = red == expect_red
@@ -967,7 +977,7 @@ def selftest():
         b[pos] = value
         return bytes(b)
 
-    # 来路闸：合法产物本身必须绿，区间内的改动也必须绿——只验红的闸会把
+    # 恒绿对照：合法产物本身必须绿，区间内的改动也必须绿——只验红的闸会把
     # "逢产物必红"这种坏法一起放行。
     check("独立实现的合法产物本身", good, False)
     check("在合法产物上再动一格区间内的字节", poke(good, disclosed[0][0] + 2, 0x00), False)
@@ -990,6 +1000,7 @@ def selftest():
     b[new_tail : new_tail + 4] = b"\x00\x00\x00\x00"
     check("next 指针没跟着条目数搬到新表尾", bytes(b), True, "目录链的形状")
     # 长度这一维单独验：截掉一格必须红（上面几条全是等长改动）
+    cell_count[0] += 1
     if not verify_product(tif, blob, good[:-1], disclosed, scrub):
         problems.append("产物短了一格，脚本没红")
     else:
@@ -1006,6 +1017,7 @@ def selftest():
         listing_before = sorted(p.name for p in corpus_dir.iterdir())
 
         def gate(what, call, want_refusal):
+            cell_count[0] += 1
             reason = call()
             if bool(reason) != want_refusal:
                 problems.append("{}：期望{}，测得{}".format(
@@ -1036,7 +1048,13 @@ def selftest():
         shutil.rmtree(tmp, ignore_errors=False)
     if tmp.exists():
         problems.append("自测的临时目录没清干净：{}".format(tmp))
-    print("inplace_crosscheck 自测：{}".format("通过" if not problems else "失败"))
+    # 地板 14 = 2 格恒绿对照 + 6 格反向注入 + 4 格产物目录布局闸 + 2 格扫描分母闸。
+    # 少了任何一格都必须是有人删的，那种删法会把"自测：通过"变成半句空话。
+    if cell_count[0] != 14:
+        problems.append("自测名单只剩 {} 格，地板是 14 格".format(cell_count[0]))
+        bad_cells[0] += 1
+    print("inplace_crosscheck 自测真值表：{} 格，错 {} 格".format(
+        cell_count[0], bad_cells[0]))
     for p in problems:
         print("  - " + p)
     return 1 if problems else 0

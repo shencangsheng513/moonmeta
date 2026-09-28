@@ -280,8 +280,9 @@ TRUTH_TABLE = [
     ("mut_d10.py", "期望表态 9 处，抓到 9 处", 0, True),
     ("mut_d10.py", "期望表态 9 处，抓到 8 处", 0, False),        # 计数闸
     ("mut_d10.py", "期望表态 9 处，抓到 9 处", 1, False),        # 退码闸
-    ("mut_d11b.py", "期望表态 5 处，抓到 5 处\n还原对账：sha 13d0f7e76d27 vs 基线 13d0f7e76d27 -> 一致", 0, True),
-    ("mut_d11b.py", "期望表态 5 处，抓到 5 处\n还原对账：sha 13d0f7e76d27 vs 基线 aaaaaaaaaaaa -> 不一致", 0, False),
+    ("mut_d11b.py", "期望表态 6 处，抓到 6 处\n还原对账：sha c7ab086f9eea vs 基线 c7ab086f9eea -> 一致", 0, True),
+    ("mut_d11b.py", "期望表态 6 处，抓到 6 处\n还原对账：sha c7ab086f9eea vs 基线 aaaaaaaaaaaa -> 不一致", 0, False),
+    ("mut_d11b.py", "期望表态 6 处，抓到 5 处", 0, False),        # 计数闸：M6 漏抓时不许蒙混成绿
     ("mut_d12.py", "开跑前锚点清点：10/10 恰好在位一次\n期望表态 10 处，抓到 10 处", 0, True),
     ("mut_d12.py", "开跑前锚点清点：9/10 恰好在位一次\n期望表态 10 处，抓到 10 处", 0, False),
     ("mut_d13.py", "基线复放（--check-only）：rc=0，清单对账：11 个步骤、28 条命令，两个口径一致\n"

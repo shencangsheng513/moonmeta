@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""D11-B 变异驱动：给 inplace_crosscheck.py 的分母闸装眼睛，逐格打红。
+"""D11-B 变异驱动：给 inplace_crosscheck.py 的分母闸与名单计数装眼睛，逐格打红。
 
-四格新闸（嵌套 / 同名 / 语料不存在 / 空扫描）各自对应一句实现里承重的话。
-每处坏法注入一次，跑 `--selftest`，要求：退出码 1 **且** stdout 里出现
-指名这一格的那句问题——只看退出码会把"红在别处"当成抓到。
+六处坏法：四格布局/扫描闸各对应一句实现里承重的话，第五处是空扫描的配对放行，
+第六处（M6）把自测名单本身删短一格——剩下十三格照样全绿，所以这一处要求计数
+真值表自己出声。每处注入一次，跑 `--selftest`，要求：退出码 1 **且** stdout 里
+出现指名这一格的那句问题——只看退出码会把"红在别处"当成抓到。
 跑完按字节还原并核对 sha。
 """
 import subprocess
@@ -14,6 +15,7 @@ TARGET = "ci/inplace_crosscheck.py"
 ANCHOR_LAYOUT = "    if not Path(corpus).is_dir():\n"
 ANCHOR_INSIDE = "    return c == o or c in o.parents\n"
 ANCHOR_SCAN = "    if files:\n        return None\n"
+ANCHOR_CELL = '    check("改 TIFF 头", poke(good, 7, blob[7] ^ 0x01), True, "TIFF 头")\n'
 
 MUTATIONS = [
     ("M1 先建目录再判（拒绝成了事后道歉）",
@@ -32,6 +34,11 @@ MUTATIONS = [
     ("M5 空扫描恒拒绝",
      ANCHOR_SCAN, "    if False:\n        return None\n",
      "扫到 1 份：期望放行，测得拒绝"),
+    # 名单本身也是一把尺子：悄悄删掉一格，剩下的十三格照样全绿，
+    # 而文档里"14 格"那句话还挂着。所以这一格要自测自己出声。
+    ("M6 自测名单被删短一格",
+     ANCHOR_CELL, "",
+     "自测名单只剩 13 格"),
 ]
 
 

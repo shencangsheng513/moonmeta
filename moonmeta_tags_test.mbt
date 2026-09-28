@@ -2,7 +2,7 @@
 //
 // `audit` 和 `read` 打印的每一行都从这里取词。名字打错或漏掉，
 // 用户看到的就是"某个不认识的编号被删了"——这份报告也就没人敢照着签字。
-// 所以这里把 README 承诺的 64 个规范名逐个钉死。
+// 所以这里把 README 承诺的 65 个规范名逐个钉死。
 
 ///|
 fn check(dir : @moonmeta.Dir, id : Int, want : String) -> Unit raise {

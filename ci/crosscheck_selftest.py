@@ -581,7 +581,7 @@ class PrivacyExpectations(unittest.TestCase):
 class OutDirNesting(unittest.TestCase):
     """产物目录不许落在语料目录里面，否则分母是自己喂出来的。
 
-    今天真踩了一次：fixture 那一轮把 `-o` 指到语料目录下，扫到 33 份，
+    这一格是 2026-09-25 真踩出来的（提交 `833dad5`）：fixture 那一轮把 `-o` 指到语料目录下，扫到 33 份，
     而按计划文件复跑时同一批 fixture 只有 13 份。
     """
 

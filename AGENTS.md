@@ -89,12 +89,12 @@ You can browse and install extra skills here:
 - README 里那段库用法示例的函数体住在 `moonmeta_readme_test.mbt` 里当测试跑（那个文件第一行
   就这么写着），那份只比 README 多一句 `@test.assert_eq(report.removed.length(), findings.length())`。
   改示例代码必须同步改它，否则 `moon test` 红。
-- README 里那些 ```console 块（今天实测 20 段，命令与真输出都在里面）大体**没有**逐字断言的测试，
+- README 里那些 ```console 块（2026-09-28 实测 22 段，`grep -c '```console' README.mbt.md`，命令与真输出都在里面）大体**没有**逐字断言的测试，
   靠人工与屏幕比对 + `ci/replay_cli.py`
   复放 CI 里同一批命令（它验命令与退码，不验那几行文字）。例外是 CLI 那几句整句文案——
   `cmd/main/main_wbtest.mbt` 把它们逐字钉住了（例如测试里那句 `contains("两条路都清不到链里这一份")`
   与"另含 XMP 包：read 不摊开它，逐条清单里也永远不会出现它。"），改这几句要先红在测试里。
-- README 的 64 个 tag 规范名逐条断言在 `moonmeta_tags_test.mbt` 里。
+- README 的 65 个 tag 规范名逐条断言在 `moonmeta_tags_test.mbt` 里。
 - README 里 ```console 那些真实输出对着 `python ci/make_fixture.py` 造的六份文件
   （默认落 `.scratch/fix/`，CI 落 `/tmp/fix`）。换 fixture 名字或路径 ⇒ 示例要重跑、
   贴真输出，不许留旧输出。
@@ -103,13 +103,15 @@ You can browse and install extra skills here:
   写进正文就是断链（这批变异驱动就是这么从 `.scratch/` 搬进 `ci/mutations/` 的）。
 - 提交前跑 `moon fmt && moon info`。CI 用 `git diff --exit-code` 卡这两处的漂移。
 
-### 门禁（都不要求语料在位，都能在 CI 复现）
+### 门禁（都不要求语料在位；除 `registry_census.py` 那一行要联网之外，都在 CI 里复现）
 
 | 命令 | 判据 |
 | --- | --- |
 | `python ci/crosscheck_selftest.py` | 归因判据的真值表（`Ran N tests` / `OK`；N 以当回合输出为准，最近一次实测 141） |
-| `python ci/inplace_crosscheck.py --selftest` | 原位门禁自己有没有眼睛（逐格 OK + 收尾"通过"） |
+| `python ci/inplace_crosscheck.py --selftest` | 原位门禁自己有没有眼睛（逐格 OK + 收尾"inplace_crosscheck 自测真值表：N 格，错 0 格"，名单被删短会红在 N 上；地板 14） |
 | `python ci/mutations/run_all.py --selftest` | 变异判定器真值表（收尾"判定器真值表：N 格，错 0 格"） |
+| `python ci/registry_census.py --selftest` | 查重计数器的真值表（11 格：计数两层、形状闸、分母闸；不打网） |
+| `python ci/registry_census.py` | 申报书查重表那 13 个词的复算（要网；收尾"分母：13 个词里取回 13 个"，取不满退 1） |
 | `python ci/mutations/mut_d9e.py` | 语料闸那三判据的区分度（16 处注入各处红一次；纯 python，不要语料也不要 moon） |
 | `python ci/replay_cli.py --check-only` | CI 的 `cli` 作业步骤/命令行清单对账（两个口径必须一致） |
 
