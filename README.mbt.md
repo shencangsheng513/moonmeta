@@ -730,6 +730,17 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
   `run_all.py --ci` 那一路 `6 个语料无关的驱动里绿 6 个`，三个后端各 `163/163`。
   这九格 2026-09-28 复跑过两趟：早上一趟是 **8/9**（唯一红的正是 `mut_d10`，原因见上面那一格），
   `adad549` 之后同一条命令复跑回到 `9 个驱动里绿 9 个（期望 9）`、rc=0。
+  **2026-09-29 当期读数（上面那些带日期的数是各自那一轮的）**：目录里有十个驱动
+  （`ls ci/mutations/mut_*.py | wc -l` → 10，新登记的是 `mut_d16_census.py`，它钉的是"查重计数把申报人自己
+  从重叠面里扣掉"那一层会不会撒谎），全量 `python ci/mutations/run_all.py` 收尾
+  `10 个驱动里绿 10 个（期望 10）` + `跑完工作树干净：注入的文件都按字节回去了。`、rc=0；
+  CI 那一臂 `run_all.py --ci` 是 `7 个语料无关的驱动里绿 7 个（期望 7）`（新驱动纯 python、不打网，所以进了这一臂）；
+  判定器自己 `run_all.py --selftest` → `判定器真值表：35 格，错 0 格`（其中两行按名字点名新驱动：
+  `ok mut_d16_census.py 注入红句翻红`、`ok 语料名单双向差集为空（SPECS 10 个 / 声明 10 个）`）；
+  `python ci/registry_census.py --selftest` → `registry_census 自测真值表：15 格，错 0 格`。
+  同一天的 CI 是四次运行、两红两绿：`36509527137` 与 `36509831635` 各红在一个只有空 runner 才看得见的断口上
+  （日志目录少 `parents=True`；`MOON` 未设时给子进程塞 Windows 默认路径），补完之后
+  `36510386442`、`36511260150` 五个作业全绿——"本机复放全绿"离"CI 会绿"还差的那一步，这两天各暴露了一个新形状。
   对拍脚本自己也有尺子：`ci/crosscheck_selftest.py` 143 个用例（2026-09-28 实测
   `Ran 143 tests`、`OK`、rc=0；两轮前是 45 个，那一轮加的 40 个全部钉当时的
   "数字复核"：条目走查算出的
@@ -911,8 +922,15 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
 
 ## 怎么拿到这个包
 
-本模块还没发布到 mooncakes，所以 `moon add shencangsheng513/moonmeta`
-现在取不到。下面两条取用方式都实际跑过：
+已经发布到 mooncakes（2026-09-29 发的 `0.1.0`，文档页
+<https://mooncakes.io/docs/shencangsheng513/moonmeta>），所以当依赖用就是：
+
+```console
+$ moon add shencangsheng513/moonmeta
+```
+
+2026-09-29 在一个新建的空模块里实跑过这一条，退码 0，输出里有
+`Downloading shencangsheng513/moonmeta@0.1.0`。
 
 拿源码直接用它自带的命令行（在仓库根目录）：
 
@@ -920,8 +938,8 @@ failed: 0`（wasm / js / wasm-gc 各一次，退码都是 0）。此外：
 $ moon run cmd/main -- audit 一张照片.jpg --policy strict
 ```
 
-当依赖装进别的模块：`moon.mod` 不支持本地路径依赖，官方给的替代是
-workspace。在两个模块的共同上级放一个 `moon.work`：
+想改本仓库的源码再让你的模块用上（也就是本地路径依赖）：`moon.mod` 不支持路径依赖，
+官方给的替代是 workspace。在两个模块的共同上级放一个 `moon.work`：
 
 ```console
 $ moon work init
@@ -937,8 +955,8 @@ import {
 }
 ```
 
-`moon check` 就会把 `@moonmeta` 解析到本地源码。发布之后这一步可以省掉，
-直接 `moon add shencangsheng513/moonmeta`。
+`moon check` 就会把 `@moonmeta` 解析到本地源码而不是注册表那份。两条路的区别只在
+"你要不要改它"：改源码用 workspace，不改就用上面的 `moon add`。
 
 ## 许可
 
