@@ -22,6 +22,7 @@ import argparse
 import datetime
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -169,16 +170,20 @@ def emit(name, ok, problems, measured, extra=""):
 
 
 def run_one(name, log_path):
-    moon = os.environ.get("MOON") or r"D:\moonbit\bin\moon.exe"
+    # 解析不到就不注入 MOON：让驱动自己按名字回落到 PATH 上的 moon，
+    # 真缺时由它自己 ABORT 出声（在 Linux runner 上塞一个 Windows 默认路径
+    # 会让唯一要真起 moon 的那一格静默瞎掉）。
+    moon = os.environ.get("MOON") or shutil.which("moon")
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
+               PYTHONDONTWRITEBYTECODE="1")
+    if moon:
+        env["MOON"] = moon
+        env["PATH"] = os.environ["PATH"] + os.pathsep + str(Path(moon).parent)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "wb") as f:
         p = subprocess.run(
             [sys.executable, "-B", "-u", str(DRIVERS_DIR / name)],
-            stdout=f, stderr=subprocess.STDOUT, cwd=str(REPO),
-            env=dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
-                     PYTHONDONTWRITEBYTECODE="1", MOON=moon,
-                     PATH=os.environ["PATH"] + os.pathsep
-                     + str(Path(moon).parent)),
+            stdout=f, stderr=subprocess.STDOUT, cwd=str(REPO), env=env,
         )
     return p.returncode, log_path.read_text(encoding="utf-8", errors="replace")
 
