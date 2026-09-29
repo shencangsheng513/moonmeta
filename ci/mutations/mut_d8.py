@@ -141,7 +141,7 @@ def compiled(text, err):
 
 problems = []
 DUMP = REPO / ".scratch" / "d8mut_out"
-DUMP.mkdir(exist_ok=True)
+DUMP.mkdir(parents=True, exist_ok=True)
 for i, m in enumerate(MUTS):
     path = m["file"]
     raw = path.read_bytes()

@@ -170,7 +170,7 @@ def emit(name, ok, problems, measured, extra=""):
 
 def run_one(name, log_path):
     moon = os.environ.get("MOON") or r"D:\moonbit\bin\moon.exe"
-    log_path.parent.mkdir(exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "wb") as f:
         p = subprocess.run(
             [sys.executable, "-B", "-u", str(DRIVERS_DIR / name)],
