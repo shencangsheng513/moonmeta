@@ -99,8 +99,8 @@ def run_census(words, fetch_one=fetch, out=print):
     s = summarize(rows)
     out("\n本申报项目出现在 {} 个词的命中里（它 2026-09-29 才发布，不算重叠面）".format(
         s["words_with_self"]))
-    out("扣掉它之后：带标记的别人的模块 {} 个，落在 {} 个词上；模块名：{}".format(
-        s["other_marked_mods"], s["words_with_others"],
+    out("扣掉它之后：带标记的别人的命中 {} 次（按词累加）＝去重后 {} 个模块，落在 {} 个词上；模块名：{}".format(
+        s["other_marked_mods"], len(s["other_names"]), s["words_with_others"],
         "、".join(s["other_names"]) if s["other_names"] else "无"))
     # 分母写在收尾，而且不满就红：一次只取回 6 个词的普查不能读成"13 个词都查过了"。
     out("分母：{} 个词里取回 {} 个".format(len(words), len(words) - len(missing)))
