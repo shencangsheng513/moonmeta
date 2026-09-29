@@ -89,6 +89,15 @@ SPECS = {
                 r"^还原\*\*失败\*\*"],
         rc_is_verdict=True,
     ),
+    "mut_d16_census.py": dict(
+        green_re=[r"^期望表态 (\d+) 处，抓到 (\d+) 处$",
+                  r"^开跑前锚点清点：(\d+)/(\d+) ",
+                  r"^基线自检（--selftest）：rc=0",
+                  r"^还原对账：sha [0-9a-f]+ vs 基线 [0-9a-f]+ -> 一致$"],
+        red_re=[r"^MISSED ", r"^SKIP  ", r"^!!!   ", r"^没抓到：", r"^基线不绿",
+                r"^还原对账：.*-> 不一致$"],
+        rc_is_verdict=True,
+    ),
 }
 DRIVERS = list(SPECS)
 
@@ -105,6 +114,7 @@ NEEDS_CORPUS = {
     "mut_d13.py": False,       # 驱动是 replay_cli --check-only
     "mut_d9e.py": False,       # 驱动是 crosscheck_selftest
     "mut_d15.py": False,       # 驱动是 moon test，夹具（IPTC/ICC 那一对）在库内
+    "mut_d16_census.py": False,  # 驱动是 registry_census --selftest，不打网
 }
 
 # 两组"必须自己相等"的计数：注入的格数 vs 抓到红的格数；锚点在位数 vs 锚点总数。
@@ -124,6 +134,7 @@ RED_LINES = {
     "mut_d13.py": "MISSED Z9：rc=0，要求 stdout 里有「x」\n",
     "mut_d9e.py": "MISSED Z9：rc=0，要求红在「x」上\n",
     "mut_d15.py": "MISSED 没红在「一条不存在的用例名」（实际红=[]）\n",
+    "mut_d16_census.py": "MISSED C1 命中里的自己不当成自己：rc=0，点名的格数=0，要求 stdout 里有「问题 命中里有自己时」\n",
 }
 
 
@@ -306,6 +317,14 @@ TRUTH_TABLE = [
     ("mut_d15.py", "开跑前锚点清点：3/3 唯一在位\n期望表态 7 处，抓到 7 处", 0, True),
     ("mut_d15.py", "开跑前锚点清点：3/3 唯一在位\n期望表态 7 处，抓到 6 处", 0, False),
     ("mut_d15.py", "开跑前锚点清点：2/3 唯一在位\nMISSED 锚点漂了，先停下。", 1, False),
+    ("mut_d16_census.py",
+     "开跑前锚点清点：4/4 恰好在位一次\n"
+     "基线自检（--selftest）：rc=0，最后一行 registry_census 自测真值表：15 格，错 0 格\n"
+     "期望表态 4 处，抓到 4 处\n"
+     "还原对账：sha df4068c0c1ca vs 基线 df4068c0c1ca -> 一致", 0, True),
+    ("mut_d16_census.py", "期望表态 4 处，抓到 3 处", 0, False),   # 计数闸
+    ("mut_d16_census.py", "开跑前锚点清点：3/4 恰好在位一次\n"
+                          "MISSED C4 锚点不唯一，先停下。", 1, False),
 ]
 
 
