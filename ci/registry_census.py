@@ -20,9 +20,14 @@
 
 跑法（仓库根目录，联网只读，不发任何凭证）：
 
-    python ci/registry_census.py                 # 13 个词，逐个打三个数
+    python ci/registry_census.py                 # 13 个词，逐个打三个数 + 收尾两行
     python ci/registry_census.py --words exif,xmp,iptc
-    python ci/registry_census.py --selftest      # 不打网，只验计数器与形状闸
+    python ci/registry_census.py --selftest      # 不打网，只验计数器与形状闸（15 格）
+
+2026-09-29 起收尾多了两行：本申报项目自己已发布在 mooncakes 上，`kw=exif`·`kw=iptc`
+这些词从此也会命中它。查重讲的是"别人的重叠面"，所以逐词那一行标出命中里有没有我、
+收尾再打"扣掉它之后还剩几个模块、落在几个词上、模块名是谁"。这个扣减由脚本算，
+不由申报书作者手算——手算的那一份腐烂得比正文还快。
 """
 
 import argparse
@@ -37,6 +42,25 @@ WORDS = [
 ]
 MARKS = ("exif", "iptc", "xmp", "id3")
 BASE = "https://mooncakes.io/api/v0/search?kw={}&limit=100"
+# 发布之后（2026-09-29 占上 0.1.0），这 13 个词里大多数都会命中申报人自己的模块。
+# 不把它从"别人重叠面"里扣掉，那张表就会把自己算成重复项。
+SELF = "shencangsheng513/moonmeta"
+
+
+def summarize(rows, self_name=SELF):
+    """把逐词结果折成"扣掉自己之后还剩多少重叠面"。
+
+    rows 的每一项是 `(词, 模块数, 带标记模块数, 带标记子包数, 命中模块名)`。
+    """
+    others = [(w, [n for n in names if n != self_name])
+              for w, _, _, _, names in rows]
+    return {
+        "words": len(rows),
+        "words_with_self": sum(1 for _, _, _, _, names in rows if self_name in names),
+        "other_marked_mods": sum(len(v) for _, v in others),
+        "words_with_others": sum(1 for _, v in others if v),
+        "other_names": sorted({n for _, v in others for n in v}),
+    }
 
 
 def fetch(word):
@@ -50,6 +74,7 @@ def fetch(word):
 def run_census(words, fetch_one=fetch, out=print):
     """逐词普查。返回取不到的词——一个都不能少，否则这句"13 个词都查过"不成立。"""
     missing = []
+    rows = []
     for word in words:
         body = None
         for attempt in range(3):
@@ -65,10 +90,18 @@ def run_census(words, fetch_one=fetch, out=print):
             missing.append(word)
             continue
         total, mods, subs, names = census(body)
-        out("kw={} 模块={} 自述提及的模块={} 自述提及的子包={}".format(
-            word, total, mods, subs))
+        rows.append((word, total, mods, subs, names))
+        out("kw={} 模块={} 自述提及的模块={} 自述提及的子包={}{}".format(
+            word, total, mods, subs,
+            "（含本申报项目）" if SELF in names else ""))
         for n in names:
             out("    命中：{}".format(n))
+    s = summarize(rows)
+    out("\n本申报项目出现在 {} 个词的命中里（它 2026-09-29 才发布，不算重叠面）".format(
+        s["words_with_self"]))
+    out("扣掉它之后：带标记的别人的模块 {} 个，落在 {} 个词上；模块名：{}".format(
+        s["other_marked_mods"], s["words_with_others"],
+        "、".join(s["other_names"]) if s["other_names"] else "无"))
     # 分母写在收尾，而且不满就红：一次只取回 6 个词的普查不能读成"13 个词都查过了"。
     out("分母：{} 个词里取回 {} 个".format(len(words), len(words) - len(missing)))
     if missing:
@@ -180,10 +213,26 @@ def run_selftest():
     else:
         print("  OK 分母闸：全取回时放行")
 
-    # 地板 11 = 6 格计数器 + 2 格形状闸 + 3 格分母/重试闸。少了任何一格都只能是
-    # 名单被删短了，而那种删法会把"自测：通过"变成半句空话。
-    if cells[0] != 11:
-        problems.append("自测名单只剩 {} 格，地板是 11 格".format(cells[0]))
+    # 扣自身这一层：发布之后"13 个词都查过了"这句话里，大多数命中是我自己。
+    def picks(rows, self_name=SELF):
+        s = summarize(rows, self_name)
+        return (s["words_with_self"], s["other_marked_mods"], s["words_with_others"])
+
+    expect("命中里有自己时，重叠面要扣掉它",
+           picks([("exif", 3, 3, 4, [SELF, "a/b"])]), (1, 1, 1))
+    expect("命中里没有自己时不许凭空扣",
+           picks([("exif", 2, 2, 3, ["a/b", "c/d"])]), (0, 2, 1))
+    expect("一个别人的命中都没有：三个数归零、模块名空",
+           picks([("id3", 0, 0, 0, []), ("iptc", 1, 1, 2, [SELF])]), (1, 0, 0))
+    expect("模块名去重后排序（同一邻居命中多个词，只点一次）",
+           summarize([("exif", 3, 2, 2, [SELF, "a/b"]),
+                      ("gps", 6, 2, 3, [SELF, "a/b"])])["other_names"],
+           ["a/b"])
+
+    # 地板 15 = 6 格计数器 + 2 格形状闸 + 3 格分母/重试闸 + 4 格"扣掉自己"。
+    # 少了任何一格都只能是名单被删短了，而那种删法会把"自测：通过"变成半句空话。
+    if cells[0] != 15:
+        problems.append("自测名单只剩 {} 格，地板是 15 格".format(cells[0]))
     print("registry_census 自测真值表：{} 格，错 {} 格".format(cells[0], len(problems)))
     for p in problems:
         print("  问题 {}".format(p))
